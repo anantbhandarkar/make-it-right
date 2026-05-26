@@ -1,8 +1,22 @@
-# Make It Right
+<div align="center">
 
-> **AI makes it work. Make It Right.**
->
-> Constraint-first skills + reviewer agents that stop AI coding agents from shipping confident-but-wrong code.
+<img src="MIR-logo.png" alt="Make It Right" width="360"/>
+
+<h3>AI makes it work.&nbsp;&nbsp;Make It Right.</h3>
+
+<p><em>Constraint-first skills + reviewer agents that stop AI coding agents<br/>from shipping confident-but-wrong backend code.</em></p>
+
+<p>
+  <a href="LICENSE"><img alt="License: Apache 2.0" src="https://img.shields.io/badge/license-Apache_2.0-D4A017"></a>
+  <img alt="skills" src="https://img.shields.io/badge/skills-29-555">
+  <img alt="runtimes" src="https://img.shields.io/badge/runtimes-9-555">
+  <img alt="tools" src="https://img.shields.io/badge/works_with-Claude%20Code%20%7C%20Cursor%20%7C%20Codex%20%7C%20Antigravity-D4A017">
+  <a href="EXTENDING.md"><img alt="PRs welcome" src="https://img.shields.io/badge/PRs-welcome-2ea44f"></a>
+</p>
+
+</div>
+
+---
 
 AI is brilliant at making code that *works* — on the happy path, in the demo, in the passing test. It is weak at making code that's *right*: correct under concurrency, partial failure, retries, multi-tenancy, and real production data. Those aren't syntax failures — they're **assumption failures**. When requirements are incomplete, AI invents them, confidently.
 
