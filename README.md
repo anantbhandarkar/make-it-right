@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="MIR-logo.png" alt="Make It Right" width="360"/>
+<img src="assets/logo.png" alt="Make It Right" width="360"/>
 
 <h3>AI makes it work.&nbsp;&nbsp;Make It Right.</h3>
 
