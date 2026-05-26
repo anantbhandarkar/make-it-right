@@ -46,9 +46,11 @@ This repo is the **backend pillar** of a planned family. Each domain is a siblin
 | ✅ shipping | `mir-backend-ruby` → `-rails` | runtime + framework | Ruby/YARV (GVL, Puma fork-safety, AR migrations) |
 | ✅ shipping | `mir-backend-rust` → `-axum` · `-actix` | runtime + frameworks | Rust/tokio (blocking the runtime, guards across await) |
 | ✅ shipping | `mir-backend-beam` → `-phoenix` | runtime + framework | BEAM (supervision, mailbox growth, GenServer bottleneck) |
-| 🔜 planned | `mir-frontend` · `mir-database` · `mir-data` · `mir-cloud` | pillars | frontend, DB, data engineering, cloud |
+| ✅ shipping | `mir-frontend` → `mir-frontend-react` | pillar + reactivity tier | Reactive-UI reliability (gates, UX/state contracts) + React 19/Compiler (hooks, effects, Suspense, server-vs-client state) |
+| 🔜 planned | `mir-frontend-react-next` · `-remix` · `-tanstack-start` · `-spa` · `mir-frontend-vue` · `mir-frontend-angular` | frontend modules/tiers | meta-frameworks + other reactivity libs |
+| 🔜 planned | `mir-database` · `mir-data` · `mir-cloud` | pillars | DB, data engineering, cloud |
 
-> **Frontend pillar is fully specced** — architecture decision, skill tree, gate adaptation, May-2026 currency baseline, and a build roadmap in **[docs/frontend-pillar-plan.md](docs/frontend-pillar-plan.md)**.
+> **Frontend pillar:** the generic `mir-frontend` gates + `mir-frontend-react` reactivity tier ship now (with `a11y-reviewer` + `frontend-perf-reviewer`). Full architecture, currency baseline, and the meta-framework build roadmap: **[docs/frontend-pillar-plan.md](docs/frontend-pillar-plan.md)**.
 
 ## What's in this repo
 
