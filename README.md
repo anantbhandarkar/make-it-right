@@ -48,6 +48,8 @@ This repo is the **backend pillar** of a planned family. Each domain is a siblin
 | ✅ shipping | `mir-backend-beam` → `-phoenix` | runtime + framework | BEAM (supervision, mailbox growth, GenServer bottleneck) |
 | 🔜 planned | `mir-frontend` · `mir-database` · `mir-data` · `mir-cloud` | pillars | frontend, DB, data engineering, cloud |
 
+> **Frontend pillar is fully specced** — architecture decision, skill tree, gate adaptation, May-2026 currency baseline, and a build roadmap in **[docs/frontend-pillar-plan.md](docs/frontend-pillar-plan.md)**.
+
 ## What's in this repo
 
 ```
