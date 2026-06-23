@@ -66,7 +66,9 @@ process.on('unhandledRejection', (reason, promise) => {
 });
 ```
 
-Critical: **`try/catch` does NOT catch errors thrown in a non-awaited promise or in a plain callback.** Only the `await` point is guarded by a surrounding `try/catch`.
+Critical: **attaching this listener replaces Node's default crash** — Node hands control to your handler instead of throwing-and-exiting. So your handler MUST exit; if it only logs and returns, you have re-introduced the zombie-process bug (a service running on a corrupted, half-initialized state). The same applies to `uncaughtException` (item 7).
+
+Also critical: **`try/catch` does NOT catch errors thrown in a non-awaited promise or in a plain callback.** Only the `await` point is guarded by a surrounding `try/catch`.
 
 ### 4. Serialized awaits in a loop — use bounded `Promise.all`
 
@@ -148,14 +150,19 @@ Do not attempt to "resume" normal operation from `uncaughtException`. Use a proc
 
 ### 8. Heap limits under container memory constraints
 
-Node's default `--max-old-space-size` is heuristically derived from the host's total RAM, **not** the container's memory limit. A 512 MB container with a Node process that inherits the host's 16 GB heuristic will be OOM-killed by the kernel before V8 triggers GC:
+**Node 20+ auto-detects the container's memory limit** (via libuv `uv_get_constrained_memory`, cgroup-v2-aware) and sizes the V8 old-space heap from *that*, not from the host's total RAM. The old "a 512 MB container inherits the host's 16 GB heuristic and gets OOM-killed" failure mode is largely fixed on current LTS — and the once-standard fix of hard-pinning a fixed value now *causes* the opposite bug:
 
 ```dockerfile
-# Set explicitly — leave headroom for the OS and native modules
+# RISKY — a fixed value OVERRIDES auto-detection. The same image in a 2 GB
+# container is now capped at 400 MB and GC-thrashes / OOMs under load.
 CMD ["node", "--max-old-space-size=400", "dist/server.js"]
 ```
 
-Also watch `--max-semi-space-size` for allocation-heavy workloads. Monitor heap via `process.memoryUsage()` and expose it as a metric.
+Guidance on Node 20+:
+
+- **Default: set nothing.** Let Node read the cgroup limit. Verify it picked it up: `node -e 'console.log(require("v8").getHeapStatistics().heap_size_limit / 1048576)'` inside the container should track the limit, not host RAM.
+- **Override only to decouple heap from the container** — e.g. large off-heap/native allocations (sharp, parsers, `Buffer` pools) need the JS heap kept *below* the container limit to leave room. When you do, set it as a *fraction of the actual limit with headroom* (e.g. ~75–80%), not a magic constant, so it scales when the limit changes. Newer Node also exposes `--max-old-space-size-percentage` for exactly this.
+- Watch `--max-semi-space-size` for allocation-heavy (short-lived-object) workloads. Monitor heap via `process.memoryUsage()` / `v8.getHeapStatistics()` and expose it as a metric.
 
 ### 9. Async context loss — `AsyncLocalStorage` for request/correlation context
 
@@ -188,8 +195,12 @@ This is the Node equivalent of Python's `contextvars` — use it for correlation
 ## How this slots into the pipeline
 
 - **Gate 0/5 (model choice):** state the concurrency model (async I/O vs. worker_threads vs. cluster) and justify it against the workload. CPU-bound work on the event loop thread is a runtime-level design defect — flag it.
-- **Gate 6 (implementation):** no sync calls in hot paths; bound all concurrent work; add AbortController + timeout on every outbound call; use `pipeline()` for streams.
-- **Gate 7 (review):** the reliability-reviewer checks items 1–9 here for any Node service.
+- **Gate 6 (implementation):** code against `references/node-gotchas.md` alongside the core codegen checklist — no sync calls in hot paths; bound all concurrent work; add `AbortSignal.timeout` + signal propagation on every outbound call; use `pipeline()` for streams; wire SIGTERM draining.
+- **Gate 7 (review):** the reliability-reviewer checks items 1–9 here (plus graceful shutdown and outbound-pooling from the reference) for any Node service.
+
+## References
+
+- `references/node-gotchas.md` — code-level right-vs-wrong companion to the footguns above, plus graceful SIGTERM shutdown, `AbortSignal` propagation, keep-alive connection pooling, startup config validation, and money/BigInt safety.
 
 ## Edit boundary (what belongs here vs. above/below)
 
