@@ -57,7 +57,7 @@ const filtered = useMemo(() => items.filter(fn), [items, fn])
 
 - **Missing deps → stale closures.** The effect sees the values from the render it was born in.
 - **Object/array literal deps → infinite loops.** `{}` and `[]` are new references every render.
-- **Exhaustive-deps lint rule is mandatory.** Use `eslint-plugin-react-hooks` v6 (merged from `eslint-plugin-react-compiler`).
+- **Lint with `eslint-plugin-react-hooks` v6** (the `eslint-plugin-react-compiler` rules are merged in, under the `react-hooks/*` namespace). `rules-of-hooks` is always mandatory. `exhaustive-deps` stays mandatory when you write effects by hand; with the Compiler's linter on, its `set-state-in-effect`/`purity` rules subsume most exhaustive-deps cases, so the team allows relaxing that one rule specifically — but only with the Compiler enforcing the replacements.
 
 ```tsx
 // BAD — effect for derived state; causes extra render
@@ -186,7 +186,7 @@ React Compiler 1.0 (GA Oct 2025) auto-memoizes pure components and derivations. 
 
 - Write idiomatic, pure components. Do not pre-emptively wrap with memo hooks.
 - Lint with `eslint-plugin-react-hooks` v6 — `eslint-plugin-react-compiler` is merged in as of v6; it reports Compiler-incompatible patterns.
-- Opt out with `"use no memo"` only for known-incompatible code (intentionally mutable objects, referential-instability dependencies, legacy integrations).
+- Opt out with `"use no memo"` only for known-incompatible code (intentionally mutable objects, referential-instability dependencies, legacy integrations). Treat it as a **temporary, tracked escape hatch** — add it with a TODO, file the incompatibility, and remove it once fixed. It is *not* a permanent boundary like `"use client"`; long-lived `"use no memo"` is debt, not a design.
 
 ```tsx
 // BAD under Compiler — redundant; Compiler already memoizes this
@@ -264,8 +264,14 @@ Refs: DOM handles, interval/timeout IDs, the latest-value pattern (callback ref 
 
 - **Gate 3 (UI state machine):** model the interaction in React terms — `useReducer` or XState for complex flows (IDLE / LOADING / SUCCESS / EMPTY / ERROR / STALE / RETRYING / OPTIMISTIC / ROLLING_BACK). Each footgun above maps to a state-machine edge that AI tends to miss (e.g. no STALE state → derived-state-in-useState; no ROLLING_BACK edge → optimistic update without rollback).
 - **Gate 5 (state ownership):** declare which state is server-owned (TanStack Query) vs client-owned (useState / Zustand / Jotai) and which components own rendering. Footguns 11, 12, and 13 are Gate-5 design decisions.
-- **Gate 6 (implementation):** code against footguns 1–13 above. The Gate-6 codegen checklist in `mir-frontend` references this tier.
+- **Gate 6 (implementation):** code against footguns 1–13 above and the code-level companion `references/react-gotchas.md`. The Gate-6 codegen checklist in `mir-frontend` references this tier.
 - **Gate 7 (review):** the reliability-reviewer checks async correctness (footguns 3, 4, 7, 11); the frontend-perf-reviewer checks footguns 9, 10; both check footgun 2. Items 1, 5, 6, 8, 12, and 13 are correctness issues any reviewer should flag.
+
+---
+
+## References
+
+- `references/react-gotchas.md` — code-level right-vs-wrong TSX companion to the footguns above, plus the React 19 primitives AI most often misuses: `use()` (stable promises), `useActionState`/`useFormStatus` placement, `useOptimistic` auto-rollback, `ref`-as-prop + ref cleanup (no `forwardRef`), `AbortController` cleanup in fetch effects, `useId` for hydration-stable ids, the SSR browser-API mismatch, and key-based remount-to-reset.
 
 ---
 
