@@ -1,6 +1,6 @@
 ---
 name: mir-backend
-description: "Make It Right (backend pillar). Constraint-first backend planning protocol for AI coding agents — AI makes code that WORKS on the happy path; this makes it RIGHT under concurrency, failure, and load. Forces the model OUT of pattern-completion ('autocomplete from latent space') and INTO explicit constraint discovery before any code is written. Use whenever a task involves backend logic that changes state, touches money/inventory/auth, spans multiple tables or services, runs under concurrency, or persists data beyond a single request. Runs a hard-gated pipeline: Intent → Constraint Interrogation → Assumption Ledger → Invariants & Failure Modes → Risk Register → Design Review → Implementation → Production-Readiness Review. Spawns specialized reviewer sub-agents. Chains into a runtime tier (e.g. mir-backend-python for CPython concerns) and a framework module (e.g. mir-backend-python-fastapi for FastAPI/SQLAlchemy/Alembic). TRIGGER for backend work in ANY language (Python, Node, Go, Rust, Java) — this is the generic pillar. SKIP for pure frontend/UI, pure read-only or compute-only tasks, and standalone database-schema or data-pipeline work (those are separate Make It Right pillars)."
+description: "Make It Right (backend pillar). Constraint-first backend planning protocol for AI coding agents — AI makes code that WORKS on the happy path; this makes it RIGHT under concurrency, failure, and load. Forces the model OUT of pattern-completion ('autocomplete from latent space') and INTO explicit constraint discovery before any code is written. Use whenever a task involves backend logic that changes state, touches money/inventory/auth, spans multiple tables or services, runs under concurrency, or persists data beyond a single request. Runs a hard-gated pipeline: Intent → Constraint Interrogation → Assumption Ledger → Invariants & Failure Modes → Risk Register → Design Review → Implementation → Production-Readiness Review. Spawns specialized reviewer sub-agents. Chains into a runtime tier (e.g. mir-backend-python for CPython concerns) and a framework module (e.g. mir-backend-python-fastapi for FastAPI/SQLAlchemy/Alembic). TRIGGER for backend work in ANY language (Python, Node, TypeScript, Go, Rust, Java, Kotlin, C#, Ruby, PHP, Elixir/Erlang) — this is the generic pillar. SKIP for pure frontend/UI, pure read-only or compute-only tasks, and standalone database-schema or data-pipeline work (those are separate Make It Right pillars)."
 trigger: /mir-backend
 argument-hint: "<task description> [--advisory] [--skip-interrogation]"
 allowed-tools:
@@ -58,7 +58,7 @@ Three gates require explicit user input (a multiple-choice prompt or written con
 
 <gate0>
 
-Before anything, do two things in your own words (no tools yet):
+Before anything, do four things in your own words (only `references/runtime-map.md` is read here):
 
 1. **Restate the real intent.** Not what they typed — what they're actually trying to make true in the world. "Build an order endpoint" → "Accept money for goods such that we never charge twice and never oversell." If your restatement and their words diverge, surface the gap now.
 
@@ -78,7 +78,9 @@ Before anything, do two things in your own words (no tools yet):
 
 If **zero** boxes tick, this is probably a pure-compute or read-only task — say so, drop to `--advisory`, and proceed lightly. Don't bureaucratize a CSV parser.
 
-3. **Check stack fitness.** Identify the runtime + framework (chosen or implied), then consult `references/runtime-map.md`. If the workload lands in that stack's "Do NOT use when…" column (e.g. a microsecond-latency path on Python, or CPU-bound ML on Node), **surface the mismatch now** — a runtime wrong for the workload is a defect no amount of correct code fixes. It's not an automatic blocker, but it must become a conscious, ledgered choice, never a silent default. Then load the matching runtime tier (`mir-backend-<runtime>`) and framework module.
+3. **Check stack fitness.** Identify the runtime + framework (chosen or implied), then consult `references/runtime-map.md`. If the workload lands in that stack's "Do NOT use when…" column (e.g. a microsecond-latency path on Python, or CPU-bound ML on Node), **surface the mismatch now** — a runtime wrong for the workload is a defect no amount of correct code fixes. It's not an automatic blocker, but it must become a conscious, ledgered choice, never a silent default. Check the **version floor** in the same file while you're there: a runtime line that stopped getting security patches is a Gate 4 risk row, not a detail for later. Then load the matching runtime tier (`mir-backend-<runtime>`) and framework module.
+
+4. **Check the pillar boundary.** Name every pillar in play before Gate 1; do not silently absorb one. If the task also designs or changes a **schema**, run `mir-database` first — its invariants and its enforcement decisions are inputs to Gate 3 here. If the deployment target is undecided, that is `mir-cloud`. If the change is to the pipeline that ships this code, that is `mir-devsecops`. A two-pillar task gets two gate runs.
 
 </gate0>
 
@@ -185,7 +187,7 @@ Write the design and get sign-off **before code**. Must explicitly state:
 
 End with: **"Approve this design or tell me what to change. I won't write code until you approve."**
 
-If the stack is Python/FastAPI, **load the runtime tier (`mir-backend-python`) and the framework module (`mir-backend-python-fastapi`) now** — they carry the runtime concurrency model and the stack-specific design gotchas (async session scope, Pydantic boundaries, Alembic safety) that this gate depends on.
+**Load the runtime tier and the framework module now** — they carry the runtime concurrency model and the stack-specific design gotchas this gate depends on. FastAPI: `mir-backend-python` + `mir-backend-python-fastapi` (async session scope, Pydantic boundaries, Alembic safety). Hono on Bun: `mir-backend-bun` + `mir-backend-bun-hono`. Every runtime in `references/runtime-map.md` has a tier.
 
 </gate5>
 
@@ -218,6 +220,24 @@ Then: triage findings by severity, fix Critical/High, and report what you fixed 
 
 ---
 
+## Security
+
+These hold in every language. The mechanics — which decorator, which ORM call, which middleware, which header — belong to the runtime tier (`mir-backend-<runtime>`) and the framework module. The checkable form is in `references/checklists.md`; the **security-reviewer** works from it at Gate 7.
+
+- **A valid token is not a resource check.** Authentication says *who* is calling. It says nothing about whether that caller may touch *this* row. Every read, update, and delete keyed on a client-supplied ID needs an ownership or membership check on the server, in the same query that loads the row (`WHERE id = ? AND owner_id = ?`) rather than in a branch after it, so no code path can skip it. OWASP ranks broken object-level authorization #1 in the API Security Top 10 (API1:2023) and broken function-level authorization #5 — the same mistake at two granularities, so check admin and internal routes for a role, not just for a token. Non-guessable IDs (UUIDv4/v7) slow enumeration; they are not the control.
+- **Never bind a request body onto a persisted object.** Allow-list the fields the client may set, per endpoint and per role. The ones that get you: `role`, `is_admin`, `tenant_id`, `user_id`, `status`, `price`, `balance`, `verified`, `created_at`. "Update the user from the body" is how a user promotes themselves. The response side is the same bug reversed — serialize an explicit field list, or password hashes, internal flags, and other users' columns ship to the client.
+- **Tenant isolation is per query, not per login.** One missing `WHERE tenant_id = ?` is a cross-tenant breach, and it will be in the query somebody wrote by hand. Decide *where* the filter is enforced — a database row policy, a data-access layer nothing bypasses, or hand review on every query — and put that decision in the Assumption Ledger. Cache keys, rate-limit counters, search indexes, object-storage prefixes, background jobs, and exported files are queries too. Schema-level enforcement is `mir-database`.
+- **Client-side checks are hints, not controls.** A hidden button, a disabled field, a role check in the UI, a validation rule in the form — all UX. The endpoint is callable directly. Re-validate every input and re-check every permission server-side on every request, including on endpoints only your own admin UI calls.
+- **Secrets and PII leak through logs and error responses, not only through breaches.** Log the correlation ID, not the request body. Redact tokens, keys, card numbers, emails, and names at the logging boundary instead of trusting each call site. Return an opaque error plus an ID to the client; keep the stack trace, the SQL, and the upstream response server-side. Debug mode left on in production turns every 500 into an internal-state dump. PII you log inherits a different retention policy and a different access list than the table it came from.
+- **Injection is one bug in many places, but the control differs per interpreter.** Never concatenate. SQL is the famous one — bind parameters. The same defect appears as NoSQL operator injection (a JSON body where a scalar was expected — coerce the type before it reaches the query), LDAP and XPath, server-side template injection, header/CRLF injection into a response or an outbound email, and log injection that forges audit lines. **Shell is the one where "escape it" is the wrong answer**: skip the shell and pass a fixed executable plus an argv array, then validate the operands — escaping a string still lets an attacker supply a leading `-` and inject an *option* the program honours. Identifiers — table, column, sort field — cannot be parameterized either; allow-list them.
+- **Insecure deserialization is remote code execution.** Untrusted bytes never reach a native object deserializer (Java serialization, Python's stdlib object serializer, PHP `unserialize`, Ruby `Marshal`, unsafe YAML loaders). Use a data-only format, validate against a schema, and cap payload size and nesting depth. Cache entries, queue messages, and session cookies count as untrusted the moment an attacker can influence them.
+- **SSRF turns any user-supplied URL into your server's request from inside the network.** Allow-list destination hosts. **Validating the resolved IP is not enough on its own** — the HTTP client then resolves the name again itself, and DNS can return a different answer the second time. Close that window: resolve, check every A/AAAA answer against private, loopback, link-local and reserved ranges, then **connect to the validated IP** with the `Host` header and SNI set to the original name. Disable redirect following and re-run the whole check per hop, or bound it. Set connect *and* read timeouts. The usual target is the cloud metadata endpoint, which hands out instance credentials — the provider-side controls for that are in `mir-cloud`. Webhook receivers, image fetchers, PDF renderers, and "import from URL" are all this.
+- **Verify what arrives, and bound it.** Webhook signatures checked against the raw body, in constant time, before parsing. Rate limits and body-size limits on every public endpoint — unbounded resource consumption is a denial of service you also get billed for. Bound pagination and any client-controlled `limit`.
+
+Everything upstream of the running process — dependency pinning, install scripts, CI secrets, image provenance, deploy IAM — is `mir-devsecops`, not this pillar.
+
+---
+
 ## Anti-Patterns (the failure this skill exists to prevent)
 
 <anti_patterns>
@@ -234,23 +254,31 @@ Then: triage findings by severity, fix Critical/High, and report what you fixed 
 | 8 | Treat the reviewer sub-agents' summaries as ground truth | They describe intent, not reality — read the flagged diffs yourself |
 | 9 | Let a `Critical`/`High` risk stay "pending" past Gate 5 | Undecided critical risk = a decision deferred to production incident |
 | 10 | Optimize for elegance over operability | N+1, chatty services, unbounded concurrency are elegant until the bill or the pager arrives |
+| 11 | Treat a valid token as permission to touch the row that ID points at | Broken object-level authorization is OWASP's #1 API risk and the most common AI backend miss — the endpoint works just as well for the attacker |
+| 12 | Enforce a rule in the client and assume the server is covered | The endpoint is callable directly. A hidden button is UX, not access control |
 
 </anti_patterns>
 
 ## When to use a chain, not one pass
 
-If the task spans **multiple independent state-changing flows** (e.g., orders *and* refunds *and* subscriptions), do not run one giant pipeline. Run Gate 0 once to map them, then one Gate 1–7 pass *per flow*. Tell the user explicitly: "This is three flows; I'll take them one at a time." A single mega-plan hides the seams where the hardest bugs live.
+If the task spans **multiple independent state-changing flows** (e.g., orders *and* refunds *and* subscriptions), do not run one giant pipeline. Run Gate 0 once to map them, then one Gate 1–7 pass *per flow*. Tell the user explicitly: "This is three flows; I'll take them one at a time." A single mega-plan hides the places where two flows touch, and that is where the hardest bugs are.
 
 ## Composing with your other skills
 
 - **anant-plan / GSD**: this is the backend-specific planning layer. When a GSD/anant-plan phase is a backend feature, run this skill *inside* that phase's planning before writing the phase's code. It produces the Assumption Ledger + Risk Register that the phase plan should cite.
 - **Runtime tier + framework module** (3-tier chain): this skill decides *what's correct* (any language); the **runtime tier** (`mir-backend-python`) carries what's true for all frameworks on that runtime (GIL, async/sync, fork-safety, cold start); the **framework module** (`mir-backend-python-fastapi`) knows the library's mechanics. At Gate 0 consult `references/runtime-map.md` to pick/validate the runtime; load the runtime tier + module at Gate 5/6.
+- **Sibling pillars — hand off, don't absorb.** A task that spans two pillars gets two gate runs, not one merged pipeline.
+  - Schema, keys, constraints, indexes, tenancy layout, or a migration against populated tables → **`mir-database`**, and run it *first*: the invariants it puts in the database are the ones this pillar's code then defends. A `CHECK` constraint survives a buggy deploy; a service-layer `if` does not.
+  - Where the workload runs — provider, serverless vs container vs VM, region and data residency, egress cost, the IaC that pins the choice → **`mir-cloud`**. Gate 0 checks runtime fitness; it does not check infrastructure fitness.
+  - CI/CD workflows, dependency pinning and lockfiles, install scripts, secrets in the pipeline, image provenance, deploy IAM, release and rollback → **`mir-devsecops`**. Everything between the commit and the running process.
+  - The native app calling this API → **`mir-mobile`**; the browser client → **`mir-frontend`**. Idempotency has two halves — the client key there, the server-side dedup here. Run both.
 
 ## Where these instructions live (edit map)
 
 When you want to change or extend this kit, edit the **right layer**. Use the placement test:
 
-Three nested questions pick the layer:
+Four questions pick the layer, in order:
+> **"Is this about code running inside a request or a job in the application process?"** If no, it belongs to a sibling pillar — schema to `mir-database`, infrastructure choice to `mir-cloud`, the delivery pipeline to `mir-devsecops`, the client to `mir-frontend` or `mir-mobile`.
 > **"Is this true for Go and Node too?"** → **generic** (edit `mir-backend`).
 > **"Is it true for every framework on this runtime (FastAPI + Django + Flask)?"** → **runtime tier** (edit `mir-backend-python`) — e.g. the GIL, async/sync, fork-safety, cold start.
 > **"Does it only bite in this one library (FastAPI / SQLAlchemy / Alembic / Redis)?"** → **framework module** (edit `mir-backend-python-fastapi`).
@@ -263,12 +291,13 @@ Three nested questions pick the layer:
 | **Runtime tier** | shared across all frameworks on a runtime (CPython: GIL, async/sync, fork-safety, cold start) | `skills/mir-backend-<runtime>/SKILL.md` (e.g. `mir-backend-python`) | the rule is true for **every framework on that runtime** but not other runtimes |
 | **Framework module** | one library's mechanics (FastAPI · SQLAlchemy · Alembic · Redis) | `skills/mir-backend-<runtime>-<framework>/SKILL.md` + its `references/` | the rule is a **mechanical footgun of one library** (session scope, async N+1, Alembic-on-populated-table, Pydantic boundaries) |
 | **Reviewers** (shared by all tiers) | the Gate 7 review passes | `agents/reliability-reviewer.md` · `agents/security-reviewer.md` · `agents/migration-reviewer.md` · `agents/constraint-interrogator.md` | a review focus area or the question-interrogation method changes |
+| **Sibling pillars** | the work on either side of the application process | `skills/mir-database/` (schema, constraints, migrations) · `skills/mir-cloud/` (where it runs, cost, residency) · `skills/mir-devsecops/` (commit → running process) · `skills/mir-frontend/` · `skills/mir-mobile/` | the rule is about a schema, an infrastructure choice, the delivery pipeline, or a client — not about handling a request |
 
 **Rule of thumb for this skill's own references** (the generic core):
 - `references/constraint-catalog.md` — the full question bank by dimension (Domain/Data/Scale/Failure/Security/Operations) + invariant patterns. Read by the interrogator at Gate 1.
 - `references/failure-mode-catalog.md` — the 15 pitfalls expanded. Read at Gate 3/4.
-- `references/checklists.md` — codegen checklist (Gate 6) + production-readiness checklist (Gate 7). Read by the reviewers at Gate 7.
-- `references/runtime-map.md` — runtime/workload fitness table (your stack vs "when NOT to use it") + which runtime tier/module to load. Read at Gate 0.
+- `references/checklists.md` — codegen checklist (Gate 6) + production-readiness checklist (Gate 7), including the full Security list the security-reviewer works from. Read by the reviewers at Gate 7.
+- `references/runtime-map.md` — runtime/workload fitness table (your stack vs "when NOT to use it"), the dated version floors, and which runtime tier/module to load. Read at Gate 0.
 
 ## Provenance
 

@@ -2,35 +2,39 @@
 
 These are **strict, checked-against** lists. For each item: either it is satisfied (point to the code), it is consciously N/A (say why), or it is a finding. "Looks fine" is not an allowed state.
 
+Written library-neutrally, with React named where a concrete example helps. The tier skill has the exact API for your stack: `mir-frontend-react`, `mir-frontend-vue`, `mir-frontend-vanilla`. Versions here were checked against the npm registry on 13 Aug 2026.
+
 ---
 
 ## Gate 6 — Codegen checklist (while writing)
 
 ### State & Data
 
-- [ ] No derived value stored in `useState` — computed values live in render (or `useMemo` only where Compiler is confirmed off and profiling justifies it)
-- [ ] All server state managed via TanStack Query (v5); no hand-rolled fetch-in-`useEffect` for remote data
-- [ ] On SSR paths, `QueryClient` is instantiated **per request** — never at module scope / never shared across users
+- [ ] No derived value stored in its own state variable — computed values are derived during render (or in a `computed`); no effect or watcher syncs a copy back
+- [ ] All server state managed by a data-fetching layer (`@tanstack/react-query` 5.101.4, SWR, or the framework's route loader / `useAsyncData`); no hand-rolled fetch-in-effect for remote data
+- [ ] On SSR paths, every cache, store, and API client is created **per request** — never at module scope, never shared across users. This is the cross-user data leak: a `QueryClient`, a `createPinia()` instance, a hand-rolled reactive singleton, a `Map` cache, or a request-token-configured SDK client at module scope is one process-wide object serving every visitor. A module-scope `defineStore()` *declaration* used through the Nuxt Pinia module is fine — that creates one store instance per Nuxt app, i.e. per request
 - [ ] Client state is minimal: only values that have no server representation and must survive re-renders (UI toggles, form draft, selection)
 - [ ] Every mutation is followed by explicit cache invalidation or optimistic update + rollback — no "fire and forget"
 - [ ] Cache keys include all dimensions that change the result (tenant, user, filter params) — no cross-user key collisions possible
 
 ### Async
 
-- [ ] Every in-flight fetch can be cancelled: `AbortController` in `useEffect` cleanup, or TanStack Query's built-in cancellation
-- [ ] Stale-response guard in place: component does not apply a response that arrived after a newer request resolved
+- [ ] Every in-flight fetch can be cancelled: `AbortController` wired to the effect/watcher cleanup, or the data library's built-in cancellation
+- [ ] Stale-response guard in place: the component does not apply a response that arrived after a newer request resolved
+- [ ] `fetch` result checked with `res.ok` — `fetch` rejects only on network failure, so a 500 with an HTML error page resolves and renders as data
 - [ ] Optimistic update defined: what the UI shows immediately, and what rollback looks like on failure
 - [ ] Retries are bounded (TanStack Query default: 3; override for non-idempotent mutations to `retry: 0`)
-- [ ] Every async surface has timeout or `staleTime` / `gcTime` configured; no indefinitely-pending states
+- [ ] Every remote request has a real deadline — `AbortSignal.timeout(ms)`, an `AbortController`, or the client's own timeout option. `staleTime` and `gcTime` are cache-lifetime settings and cancel nothing; a request with `staleTime` set can still hang forever
+- [ ] Every listener, observer, timer, and subscription created by this code has a matching teardown, written in the same edit — the library's unmount hook, or one `AbortController` per instance with no framework (failure-mode #16)
 
 ### Rendering
 
-- [ ] `<Suspense>` + `<ErrorBoundary>` placed **per data subtree** — not only at the root
-- [ ] `useSuspenseQuery` used only where the query is prefetched (Server Component / route loader) — no client-side suspense waterfalls
-- [ ] No hydration-unsafe values in render (`Date.now()`, `Math.random()`, `window`, `navigator`, locale) — gated behind `useEffect` or `use client`
-- [ ] Heavy or non-urgent state updates wrapped in `startTransition`; deferred values via `useDeferredValue` where appropriate
-- [ ] List keys are stable, unique identifiers — never array index on a dynamic/reorderable list
-- [ ] No `useEffect` used to derive or sync state that can be computed in render (failure-mode #3)
+- [ ] Loading and error boundaries placed **per data subtree**, not only at the root (React `<Suspense>` + `<ErrorBoundary>`; Vue `<Suspense>` is still experimental — check `mir-frontend-vue` before depending on it; plain DOM renders its own states)
+- [ ] Suspense-reading queries are prefetched on the server or in the route loader — no client-side suspense waterfall on first load
+- [ ] No hydration-unsafe values in render (`Date.now()`, `Math.random()`, `crypto.randomUUID()`, `window`, `navigator`, locale, timezone) — computed once on the server and carried in the payload, or read after mount
+- [ ] Heavy or non-urgent state updates are deferred off the interaction (React `startTransition` / `useDeferredValue`)
+- [ ] List keys are stable, unique identifiers from the data — never an array index on a list that reorders, filters, or prepends
+- [ ] No effect or watcher used to derive or sync state that can be computed in render (failure-mode #3)
 
 ### Accessibility
 
@@ -46,23 +50,28 @@ These are **strict, checked-against** lists. For each item: either it is satisfi
 
 ### Performance
 
-- [ ] INP ≤ 200 ms: heavy work deferred (`startTransition`, Web Worker, `scheduler.yield()`); event handlers do not block the main thread
-- [ ] LCP ≤ 2.5 s: primary above-fold image uses `fetchpriority="high"` (or `next/image` with `priority`); no render-blocking resources
+- [ ] INP ≤ 200 ms: heavy work deferred (React `startTransition`, a Web Worker, or `scheduler.yield()` where supported — it is not Baseline everywhere, so feature-detect); event handlers do not block the main thread
+- [ ] LCP ≤ 2.5 s: primary above-fold image uses `fetchpriority="high"` (or the framework's `priority` flag) and nothing else does; no render-blocking resources
 - [ ] CLS ≤ 0.1: image, video, and ad slots have explicit width/height or `aspect-ratio` reserved; no late-injected content above the fold
-- [ ] No unnecessary `useMemo` / `useCallback` in Compiler-enabled projects; Compiler interop verified (failure-mode #14)
+- [ ] Geometry reads and style writes are not interleaved in a loop — batch all reads, then all writes (failure-mode #8)
+- [ ] Manual memoization is deliberate, not reflexive: React Compiler 1.0.0 **preserves** whatever `useMemo`/`useCallback` you wrote, and an incomplete dependency array then stops it optimizing that code at all (failure-mode #14)
 - [ ] Images served in modern format (WebP/AVIF), sized for the display context, lazy-loaded below the fold
 - [ ] Fonts use `font-display: swap` or `optional`; subset where possible; preloaded if critical
 - [ ] First-load JS bundle within project budget (default starting point: ≤ 100 KB compressed); code-split at route boundaries
 
 ### Security
 
-- [ ] Any user-controlled HTML rendered via the raw-HTML prop is sanitized first (DOMPurify or equivalent) — never raw user input
-- [ ] Markdown rendered through a safe renderer that does not output unsanitized HTML
-- [ ] No secrets in `NEXT_PUBLIC_*` variables (or framework-equivalent public-bundle env vars) — secrets belong in server-only env vars
-- [ ] Client-side authorization checks (hidden routes, disabled buttons) are UX hints only; the same rule is enforced server-side
-- [ ] CSP headers configured; Trusted Types policy enabled where the framework supports it
-- [ ] Server Action inputs are revalidated on the server (Zod or equivalent) — client-supplied values are untrusted
+- [ ] Any user-controlled HTML reaching a raw-HTML sink is sanitized first — DOMPurify **≥ 3.4.13**, pinned exactly, never `IN_PLACE: true`
+- [ ] Markdown rendered with raw-HTML passthrough off; if it must be on, an explicit sanitization schema is configured. LLM output is treated as untrusted input on the same path
+- [ ] No secrets in build-time public env vars (`NEXT_PUBLIC_*`, `VITE_*`, `PUBLIC_*`, `NUXT_PUBLIC_*`, `REACT_APP_*`) or in any module a client component imports — verified by grepping the **built output** in CI, not the source
+- [ ] Client-side authorization checks (hidden routes, disabled buttons, lazy admin chunks) are UX hints only; the same rule is enforced server-side, per object
+- [ ] User-supplied URLs are validated by parsed protocol against an allow-list before they reach `href`/`src`/`action` — not by string prefix match
+- [ ] CSP configured with no `'unsafe-inline'` / `'unsafe-eval'`, plus `object-src 'none'`, `base-uri 'none'`, and `frame-ancestors` set for clickjacking; Trusted Types enabled where the stack supports it
+- [ ] Every third-party `<script src>` is pinned to an exact version with `integrity` + `crossorigin="anonymous"`, or self-hosted; tag-manager access is named and limited
+- [ ] Server Action / RPC inputs are revalidated and re-authorized on the server (Zod or equivalent) — client-supplied values and TypeScript types are not enforcement
+- [ ] State-changing endpoints have a CSRF defence when auth is cookie-based: `SameSite` plus an origin check or a double-submit token
 - [ ] SSR dehydration uses a safe serializer (not bare `JSON.stringify` into a `<script>` block) — failure-mode #7
+- [ ] Lockfile committed; CI installs with `npm ci`; install scripts disabled; `npm audit` clean at High+; every package name confirmed to exist on the registry (failure-mode #15)
 
 ### i18n & UX completeness
 
@@ -85,19 +94,22 @@ Run by the reviewer sub-agents. Each finding: **severity (Critical / High / Med 
 - Stale closures: callbacks used in timers, subscriptions, or long-lived event listeners reference current state via ref or are re-created with cleanup
 - Error boundaries are granular: a failure in a secondary data subtree does not blank the primary page content
 - Suspense boundaries have prefetched data on SSR paths; no client-only waterfalls on initial load
+- Teardown: every listener, observer, timer, and subscription has a removal path that actually runs — including the deactivated-not-destroyed case for cached/kept-alive components (failure-mode #16)
+- Module-scope state: on any server-rendered path, no cache, store, or API client is constructed at module scope (failure-mode #6). Grep before concluding it is clean
 
-### Security-reviewer focus (frontend surfaces)
+### Security-reviewer focus (the browser side)
 
-- Raw-HTML prop usage: every instance audited; user-controlled content always goes through a sanitizer first
-- `NEXT_PUBLIC_*` (or equivalent public env) audit: no API keys, signing secrets, or internal identifiers exposed
-- Client-side auth checks identified and confirmed as hints only; corresponding server-side enforcement located in code
-- CSP policy present and does not use `unsafe-inline` / `unsafe-eval` without documented justification
-- Server Actions (or equivalent RPC): each one validates and re-authorizes inputs server-side; CSRF protection via framework default or explicit token
-- npm supply-chain: package list cross-checked against npm registry (no hallucinated packages); lock file present; `npm audit` clean at High+
+- Raw-HTML sinks: grep for every one by name (the tier skill lists them) and audit each instance; user-controlled content always goes through a sanitizer first, and `dompurify` is pinned at ≥ 3.4.13
+- Public env audit: no API keys, signing secrets, or internal hostnames in any build-time public variable or client-imported module — checked against the built output, not the source. Source maps not served from a public origin
+- Client-side auth checks identified and confirmed as hints only; the corresponding server-side, per-object enforcement located in code
+- CSP present, without `unsafe-inline` / `unsafe-eval`, with `frame-ancestors` set; Trusted Types enabled or its absence justified
+- Server Actions (or equivalent RPC): each one authenticates, authorizes the specific object, validates arguments, and returns filtered data — not the database row. CSRF protection via framework default or explicit token
+- Third-party scripts and tag managers enumerated, pinned, `integrity`-checked; who can change them is written down
+- npm supply chain: every package name cross-checked against the registry (no hallucinated or typosquatted names); lockfile present; install scripts off; `npm audit` clean at High+
 
 ### a11y-reviewer focus (WCAG 2.2 AA)
 
-- Automated axe-core run (in CI or Storybook addon) with zero Critical / Serious violations
+- Automated axe-core run (4.13.0, in CI or the Storybook addon) with zero Critical / Serious violations. Automation cannot see focus order, meaningful alt text, or whether a flow is completable — a clean axe run is the floor, not the review
 - Keyboard-only navigation: every flow completable without a mouse; no keyboard traps outside modals; modals trap and release correctly
 - Focus management: visible focus indicator present on all interactive elements; meets 3:1 Focus Appearance contrast
 - Target size: all touch/click targets ≥ 24 × 24 CSS px; primary actions ≥ 44 × 44 px preferred
@@ -112,8 +124,8 @@ Run by the reviewer sub-agents. Each finding: **severity (Critical / High / Med 
 - CLS ≤ 0.1: all media and dynamic-content containers have reserved space; no unsized images
 - Fetch waterfalls: no sequential data dependencies in child components; sibling fetches are parallel; route loaders or Server Components hoist data to the top
 - Bundle budget: first-load JS ≤ project-defined limit (default baseline ≤ 100 KB compressed); route splitting present; no accidental whole-library imports (e.g. `import _ from 'lodash'`)
-- React Compiler interop: if Compiler is enabled, no unnecessary manual `useMemo`/`useCallback`; `eslint-plugin-react-hooks` v6 clean; `"use no memo"` used only where documented
-- Image/font: `next/image` (or equivalent) used for all content images; `next/font` (or equivalent) for web fonts; no layout shift from font swap
+- React Compiler interop: `eslint-plugin-react-hooks` **7.1.1** clean. Note v7 turned the compiler rules on inside `recommended` — upgrading from v6 turns CI red on code that passed before, so treat that as a scheduled task. `preserve-manual-memoization` findings are the ones that matter; `"use no memo"` only where documented
+- Image/font: the framework's image and font primitives used for all content images and web fonts; explicit dimensions everywhere; a metric-matched fallback so the font swap does not shift layout
 
 ---
 
@@ -121,29 +133,30 @@ Run by the reviewer sub-agents. Each finding: **severity (Critical / High / Med 
 
 Layered strategy — each layer catches a distinct class of AI-generated errors:
 
-| Layer | Tool (May 2026) | What it catches |
+| Layer | Tool | What it catches |
 |---|---|---|
-| **Unit** | Vitest | Logic errors in hooks, utilities, state machines, reducers; stale-closure bugs in isolated callbacks |
-| **Component** | Storybook + Vitest addon *or* Playwright Component Testing | Per-state rendering (empty, error, loading, stale); a11y (axe-core in Storybook a11y addon); visual snapshot baseline |
+| **Unit** | Vitest | Logic errors in hooks, composables, utilities, state machines, reducers; stale-closure bugs in isolated callbacks |
+| **Component** | Storybook + the Vitest addon *or* Playwright Component Testing | Per-state rendering (empty, error, loading, stale); a11y via the axe addon; visual snapshot baseline |
 | **E2E** | Playwright | Full interaction flows; keyboard navigation; focus management; form validation; race conditions under network throttling |
 | **Visual regression** | Playwright screenshots *or* Chromatic | FOWT; layout shift; theme switching; responsive breakpoints |
-| **A11y automation** | axe-core in CI (via `@axe-core/playwright` or Storybook addon) | WCAG 2.2 AA violations: missing labels, low contrast, missing landmarks, focus indicators |
+| **A11y automation** | axe-core 4.13.0 in CI (via `@axe-core/playwright` or the Storybook addon) | WCAG 2.2 AA violations: missing labels, low contrast, missing landmarks, focus indicators |
 
-**Important:** INP is a runtime metric measured only in RUM (e.g. web-vitals.js → analytics). It cannot be reliably reproduced in CI. Treat a missing RUM setup as a High finding at Gate 7.
+**Important:** INP is a runtime metric measured only in RUM (`web-vitals` 6.1.0 → analytics, or a platform RUM product). It cannot be reliably reproduced in CI. Treat a missing RUM setup as a High finding at Gate 7.
 
 **Which layer catches which AI error class:**
-- Derived state in `useState` → unit (hook test with multiple renders)
-- Stale response / race → E2E with simulated slow network (Playwright `routeFulfill` with delay)
-- useEffect infinite loop → unit (render count assertion)
-- Stale closure → unit (simulate timer / subscription callback after state change)
-- Hydration mismatch → E2E (compare SSR HTML to hydrated DOM; Next dev mode throws on mismatch)
-- Cross-user queryClient bleed → integration (two concurrent SSR renders in the same process)
+- Derived state kept in a second state variable → unit (test across multiple renders)
+- Stale response / race → E2E with a simulated slow network (Playwright route interception with a delay)
+- Effect or watcher loop → unit (render-count assertion)
+- Stale closure → unit (fire the timer / subscription callback after a state change)
+- Hydration mismatch → E2E (compare the server HTML to the hydrated DOM; most dev servers throw on mismatch)
+- Cross-user bleed from module-scope state → integration (two concurrent SSR renders in one process, two identities)
+- Missing teardown / leak → integration (mount and unmount N times, then a heap snapshot filtered to detached nodes)
 - INP-blocking handler → RUM only
 - Missing UX states → component (story-per-state + axe) + E2E (simulate each network condition)
-- Missing ErrorBoundary → E2E (inject an error into the data subtree; assert partial-page, not blank)
-- XSS via raw-HTML prop → unit (render with a payload string; assert it is escaped in the DOM)
-- FOWT → visual regression (screenshot at page-load before hydration)
-- Supply-chain → `npm audit` in CI
+- Missing error boundary → E2E (inject an error into the data subtree; assert a partial page, not a blank one)
+- XSS via a raw-HTML sink → unit (render with a payload string; assert it is escaped in the DOM)
+- FOWT → visual regression (screenshot at page load, before hydration)
+- Supply chain → `npm audit` and a lockfile diff in CI
 
 ---
 

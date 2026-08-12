@@ -3,6 +3,9 @@
 # Installs the skills, reviewer agents, and AGENTS.md into the right location for your
 # coding agent. Symlinks (not copies) so edits in this repo are live immediately.
 #
+# Runs ./validate.py first and refuses to install if it reports errors. A skill that
+# names a skill nobody wrote loads nothing, silently — that is what this prevents.
+#
 # Usage:  ./install.sh [--tool=claude|cursor|codex|antigravity|all]   (default: claude)
 #         CLAUDE_HOME / CODEX_HOME / GEMINI_HOME override the target dirs.
 set -euo pipefail
@@ -26,6 +29,27 @@ link() {  # link <source> <target>  (skips real files, refuses to clobber non-sy
   fi
   ln -sfn "$src" "$dst"
   echo "  LINK  $dst -> $src"
+}
+
+validate_tree() {  # refuse to install a tree that fails validation
+  local script="$REPO_DIR/validate.py"
+  if [ ! -f "$script" ]; then
+    echo "  WARN  validate.py not found — installing unvalidated" >&2
+    return
+  fi
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "  WARN  python3 not found — skipping validation. Run ./validate.py when you can." >&2
+    return
+  fi
+  local status=0
+  python3 "$script" --quiet || status=$?
+  if [ "$status" -ne 0 ]; then
+    echo >&2
+    echo "Refusing to install: validate.py exited $status (1 = errors, 2 = unreadable tree)." >&2
+    echo "Run ./validate.py for the full report, fix the errors, then re-run ./install.sh." >&2
+    exit 1
+  fi
+  echo "  OK    skill tree validated"
 }
 
 install_skills_to() {  # install_skills_to <skills_dir>
@@ -76,6 +100,10 @@ install_antigravity() {
   echo "  NOTE  Skills load on-demand by description. Reviewer agents run inline per the"
   echo "        AGENTS.md pipeline (their checklists ship inside the mir-backend skill)."
 }
+
+echo "→ Validating  ($REPO_DIR)"
+validate_tree
+echo
 
 case "$TOOL" in
   claude)       install_claude ;;

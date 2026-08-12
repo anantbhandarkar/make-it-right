@@ -27,6 +27,8 @@ The questions LLMs skip because the answers live in someone's head, not the code
 - What's the read/write ratio? (Drives indexing and caching decisions.)
 - Does this data already exist in production? (If yes → migration safety is mandatory.)
 
+If the answers change the *schema* — new tables, new keys, a tenancy layout, a constraint, an index, a migration against populated tables — that is `mir-database`'s pipeline, and it runs before this one. Ask enough here to know whether that handoff is needed; don't design the schema inside a backend interrogation.
+
 ## Dimension 3 — Scale
 
 - Expected steady-state QPS and **peak** QPS? (Peak, not average, breaks systems.)
@@ -50,13 +52,18 @@ The dimension AI most reliably ignores. For every external dependency:
 
 Beyond JWT/OAuth (which AI over-focuses on):
 
-- Tenant model: single-tenant, shared-DB-with-row-scoping, or DB-per-tenant?
-- Authorization: is it enforced **server-side on every object access** (BOLA/IDOR), or just at the route?
+- Tenant model: single-tenant, shared-DB-with-row-scoping, or DB-per-tenant? And *where* is the tenant filter enforced — database policy, a data-access layer, or hand review of each query?
+- Authorization: is it enforced **server-side on every object access** (BOLA/IDOR), or just at the route? Do admin and internal routes check a role, or only a valid token?
 - RBAC / ABAC? Who can escalate to whom?
 - Is there PII? How is it classified, logged (or NOT logged), encrypted?
-- Mass assignment: can a client set fields it shouldn't (`is_admin`, `account_balance`) via the request body?
-- SSRF surface: does this take a URL or fetch a remote resource?
+- Mass assignment: can a client set fields it shouldn't (`is_admin`, `account_balance`) via the request body? And does the response return more than the caller should see?
+- SSRF: does this take a URL or fetch a remote resource on the user's behalf?
+- Untrusted input reaching a native object deserializer, a shell command, or a server-side template?
+- Does anything here rely on a client-side check (a hidden control, a form validator, a UI role gate) that the endpoint does not re-enforce?
 - Secret handling: any chance secrets land in logs or error messages?
+- Inbound webhooks: is the signature verified against the raw body before parsing?
+
+The pillar's `## Security` section states the rules these questions test for; `checklists.md` has the checkable form.
 
 ## Dimension 6 — Operations
 

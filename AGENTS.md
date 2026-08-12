@@ -28,10 +28,12 @@ Hidden invariant violations · idempotency (retries without dedup → double cha
 - **Generic, all-language backend rules** → the `mir-backend` skill: `skills/mir-backend/SKILL.md` + its `references/` (constraint-catalog, failure-mode-catalog, checklists, runtime-map). Edit here if the rule is true for Go/Node/Java too.
 - **Runtime-shared mechanics (CPython: GIL, async/sync, fork-safety, cold start)** → the `mir-backend-python` runtime tier. New runtime → `mir-backend-<runtime>`.
 - **One library's mechanics (FastAPI · SQLAlchemy · Alembic · Redis)** → the `mir-backend-python-fastapi` module. New framework on a runtime → `mir-backend-<runtime>-<framework>`.
+- **Another domain** → its own pillar skill, same pillar → tier → module pattern: `mir-frontend` (+ `-react` / `-vue` / `-vanilla` tiers), `mir-mobile`, `mir-database`, `mir-cloud`, `mir-devsecops`. None of their content belongs in this file.
 - **This always-on persona / pipeline summary** → this file (`AGENTS.md`).
 - **Review passes** → `agents/*.md`.
-- Full placement test + edit map: `mir-backend/SKILL.md` → "Where these instructions live".
+- Full placement test + edit map: `mir-backend/SKILL.md` → "Where these instructions live". Run `./validate.py` before committing; `./install.sh` refuses to install on errors.
 
 ## Tool notes
 - **Claude Code / Cursor:** the `mir-backend` (generic), `mir-backend-python` (runtime), and `mir-backend-python-fastapi` (framework) skills + reviewer sub-agents load from `~/.claude/{skills,agents}`. Use the structured question tool for gate prompts.
 - **Codex / Antigravity:** read the skills under their respective skill dirs (see repo `install.sh`). Where sub-agents aren't available, run each reviewer's checklist inline. Ask gate questions in plain text with the default clearly marked.
+

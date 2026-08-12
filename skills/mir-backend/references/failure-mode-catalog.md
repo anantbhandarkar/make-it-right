@@ -7,7 +7,7 @@ The meta-pattern: **LLMs reason in static snapshots; distributed systems fail in
 ---
 
 ## 1. Hidden invariant violations
-Code passes tests, compiles, looks clean — and silently breaks a rule nobody wrote down (one active subscription, balance ≥ 0, refund ≤ charge). **Why AI misses it:** invariants are tribal knowledge, scattered across people/docs. **Defuse:** declare invariants explicitly in Gate 3; enforce them at the DB level (constraints, unique indexes) not just app logic.
+Code passes tests, compiles, looks clean — and silently breaks a rule nobody wrote down (one active subscription, balance ≥ 0, refund ≤ charge). **Why AI misses it:** invariants are tribal knowledge, scattered across people/docs. **Defuse:** declare invariants explicitly in Gate 3; enforce them at the DB level (constraints, unique indexes) not just app logic — a constraint survives a buggy deploy, a background job, and the second service that starts writing the same table. Deciding which invariant is enforced where is `mir-database`'s enforcement-boundary step; run it first when the task also touches the schema.
 
 ## 2. Temporal logic failures
 Retry semantics, eventual consistency, delayed jobs, saga compensation, webhook ordering, stale reads after writes. **Why:** AI thinks in snapshots, not timelines. **Defuse:** for every async/multi-step flow ask "what's the ordering, and what if it's out of order?" Webhook-before-DB-commit is the canonical one.
@@ -28,19 +28,19 @@ Functionality ships before operability: no correlation IDs, structured logs, tra
 No queue limits, bounded concurrency, circuit breakers, retry budgets, or degradation modes. **Why:** AI assumes infinite capacity. **Defuse:** ask about peak QPS in Gate 1; decide what to shed and how to degrade when a dependency is slow (not just down — *slow* is worse, it ties up resources).
 
 ## 8. Multi-tenant isolation
-Missing tenant scoping, row-level security, cache partitioning, noisy-neighbor prevention, billing isolation → catastrophic cross-tenant data leaks. **Defuse:** every query filtered by tenant; cache keys namespaced by tenant; verify in the security review. This is a data-breach-class bug.
+Missing tenant scoping, row-level security, cache partitioning, noisy-neighbor prevention, billing isolation → catastrophic cross-tenant data leaks. **Defuse:** every query filtered by tenant; cache keys namespaced by tenant; verify in the security review. Background jobs, exports, search indexes, and storage prefixes are queries too — they are where the missing filter usually is, because nobody reviews them. Database-enforced isolation (row-level security, tenancy layout) is `mir-database`. This is a data-breach-class bug.
 
 ## 9. Cache invalidation & consistency
 AI adds caching but not an invalidation strategy. Missing: stale-while-revalidate, write-through vs write-back, **cache stampede** prevention, eviction implications. **Defuse:** for any cache, answer "what writes invalidate this, and what happens to N concurrent misses on a cold key?"
 
 ## 10. Security beyond auth
-AI over-indexes on JWT/OAuth and misses: SSRF, insecure deserialization, **mass assignment**, timing attacks, **broken object-level authorization (BOLA/IDOR)**, secret leakage in logs, insecure defaults, privilege escalation. **Defuse:** the security-reviewer checklist; especially verify object-level authz on every fetch-by-id.
+AI over-indexes on JWT/OAuth and misses: SSRF, insecure deserialization, **mass assignment**, timing attacks, **broken object-level authorization (BOLA/IDOR)**, secret and PII leakage in logs and error responses, injection in its less-famous forms, insecure defaults, privilege escalation. It also treats a client-side check as if it were a control — a hidden button and a form validator are UX; the endpoint is still callable directly. **Defuse:** the pillar's `## Security` section for the rules, `checklists.md` for the checkable form, and the security-reviewer at Gate 7. Especially verify object-level authz on every fetch-by-id. Supply-chain and pipeline security is a different pillar (`mir-devsecops`); cloud IAM and metadata-endpoint hardening is `mir-cloud`.
 
 ## 11. Data lifecycle neglect
 No retention policy, GDPR/CCPA deletion, archival, soft-delete semantics, audit retention, PII classification, legal holds. **Why:** initial requirements rarely mention end-of-life. **Defuse:** ask retention + deletion in Gate 1 if PII is present.
 
 ## 12. Schema evolution blindness
-AI writes schemas as if data starts empty forever. Weak at backward compatibility, rolling deploys, nullable migration phases, contract evolution, blue/green constraints. **Defuse:** migration-reviewer + expand/contract pattern. (Full detail in mir-backend-python-fastapi/alembic-migration-safety.md.)
+AI writes schemas as if data starts empty forever. Weak at backward compatibility, rolling deploys, nullable migration phases, contract evolution, blue/green constraints. During a rolling deploy the old code and the new code run at the same time against one schema — every migration has to be correct for both. **Defuse:** migration-reviewer + expand/contract pattern. Engine-agnostic detail is in `mir-database` (`references/migration-safety.md`); engine mechanics in `mir-database-postgres` / `mir-database-mongo`; the migration tool's own footguns in the framework module (Alembic lives in `mir-backend-python-fastapi`).
 
 ## 13. Cost-unaware architectures
 N+1 queries, overusing queues, excessive reads, chatty microservices, embeddings/vector queries everywhere, over-indexing. **Why:** AI optimizes elegance, not the cloud bill. **Defuse:** flag N+1 and fan-out in review; question every new index and every new network hop.
