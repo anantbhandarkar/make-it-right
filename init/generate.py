@@ -132,6 +132,57 @@ def plan(repo: str, resolved: list[str], answers: dict, stamp: str) -> list[dict
     return items
 
 
+def install_project_skills(repo: str, resolved: list[str], repo_dir: str) -> list[str]:
+    """Symlink this repo's tiers/modules into <repo>/.claude/skills/.
+
+    Claude Code merges ~/.claude/skills with <repo>/.claude/skills, so with a global
+    install of --scope=pillars the repo ends up with exactly: the 7 pillars (everywhere)
+    plus the handful of tiers/modules this repo actually uses. A repo that never runs
+    mir init still gets the pillar gates, which is the right graceful degradation.
+
+    Depth-1 slugs are skipped: they are the global floor, and personal skills take
+    precedence over project skills anyway, so a local copy would be shadowed.
+    """
+    dest_dir = os.path.join(repo, ".claude", "skills")
+    os.makedirs(dest_dir, exist_ok=True)
+    linked = []
+    for slug in resolved:
+        if slug.count("-") <= 1:
+            continue                      # pillar: lives in the global floor
+        src = os.path.join(repo_dir, "skills", slug)
+        if not os.path.isdir(src):
+            continue
+        dst = os.path.join(dest_dir, slug)
+        if os.path.exists(dst) and not os.path.islink(dst):
+            continue                      # never clobber a real directory
+        if os.path.islink(dst) or os.path.exists(dst):
+            os.unlink(dst)
+        os.symlink(src, dst)
+        linked.append(slug)
+    return linked
+
+
+def prune_project_skills(repo: str, keep: list[str]) -> list[str]:
+    """Remove mir-* symlinks in <repo>/.claude/skills that are no longer resolved.
+
+    Without this, re-running mir init after a stack change leaves the old stack's skills
+    loading forever -- the exact context creep this feature exists to remove.
+    """
+    dest_dir = os.path.join(repo, ".claude", "skills")
+    if not os.path.isdir(dest_dir):
+        return []
+    keep_set = set(keep)
+    removed = []
+    for name in sorted(os.listdir(dest_dir)):
+        if not name.startswith("mir-"):
+            continue
+        p = os.path.join(dest_dir, name)
+        if os.path.islink(p) and name not in keep_set:
+            os.unlink(p)
+            removed.append(name)
+    return removed
+
+
 def _preserve_tail(repo: str, rel: str, new_content: str) -> str:
     """For AGENTS.md, keep whatever the human wrote below the preserve marker."""
     if rel != "AGENTS.md":

@@ -97,6 +97,20 @@ def cmd_init(args) -> int:
         print(f"  {w}")
     print()
 
+    # 4b. optional: scope this repo's skills locally
+    if args.install:
+        repo_dir = os.path.dirname(HERE)
+        linked = gen.install_project_skills(repo, res["skills"], repo_dir)
+        removed = gen.prune_project_skills(repo, res["skills"])
+        print(f"Linked {len(linked)} project skill(s) into .claude/skills/:")
+        for s in linked:
+            print(f"  {s}")
+        if removed:
+            print(f"Removed {len(removed)} no-longer-resolved skill(s): {', '.join(removed)}")
+        print("  (pillars come from the global install; run")
+        print("   ./install.sh --scope=pillars to keep that floor small)")
+        print()
+
     # 5. verify
     probe = os.path.join(repo, ".mir", "probe.py")
     print("Verifying the generated guard against its manifest...")
@@ -130,6 +144,9 @@ def main() -> int:
     p_init.add_argument("repo", nargs="?", default=".")
     p_init.add_argument("--answers", help="JSON file of {pillar: choice} to skip the picker")
     p_init.add_argument("--dry-run", action="store_true", help="print the plan, write nothing")
+    p_init.add_argument("--install", action="store_true",
+                        help="symlink this repo's tiers/modules into .claude/skills/ "
+                             "(pairs with ./install.sh --scope=pillars)")
     p_init.add_argument("--noninteractive", action="store_true", help="fail on ambiguity, don't guess")
     p_init.set_defaults(func=cmd_init)
 

@@ -7,18 +7,35 @@
 # names a skill nobody wrote loads nothing, silently — that is what this prevents.
 #
 # Usage:  ./install.sh [--tool=claude|cursor|codex|antigravity|all]   (default: claude)
+#         ./install.sh --scope=pillars        install only the 7 pillars globally
 #         CLAUDE_HOME / CODEX_HOME / GEMINI_HOME override the target dirs.
+#
+# --scope controls how much of the tree goes into the GLOBAL config:
+#   all      (default)  every skill. Simple, but every repo pays for every skill's
+#                       description at session start (~17k tokens for 46 skills).
+#   pillars             only the depth-1 skills (mir-backend, mir-frontend, mir-mobile,
+#                       mir-database, mir-cloud, mir-devsecops, mir-init) -- about 3k
+#                       tokens. Every repo still gets the gates; the runtime tiers and
+#                       framework modules are installed per project by `mir init --install`,
+#                       which resolves exactly the ones that repo needs.
+# Claude Code merges ~/.claude/skills and <repo>/.claude/skills, so the two combine.
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TOOL="claude"
+SCOPE="all"
 for arg in "$@"; do
   case "$arg" in
-    --tool=*) TOOL="${arg#*=}" ;;
-    --tool)   shift; TOOL="${1:-claude}" ;;
+    --tool=*)  TOOL="${arg#*=}" ;;
+    --tool)    shift; TOOL="${1:-claude}" ;;
+    --scope=*) SCOPE="${arg#*=}" ;;
     *) echo "unknown arg: $arg" >&2; exit 2 ;;
   esac
 done
+case "$SCOPE" in
+  all|pillars) ;;
+  *) echo "unknown --scope: $SCOPE (use all or pillars)" >&2; exit 2 ;;
+esac
 
 link() {  # link <source> <target>  (skips real files, refuses to clobber non-symlinks)
   local src="$1" dst="$2"
@@ -53,10 +70,22 @@ validate_tree() {  # refuse to install a tree that fails validation
 }
 
 install_skills_to() {  # install_skills_to <skills_dir>
-  local dir="$1"
+  local dir="$1" n=0
   for skill in "$REPO_DIR"/skills/*/; do
-    link "${skill%/}" "$dir/$(basename "${skill%/}")"
+    local name; name="$(basename "${skill%/}")"
+    # --scope=pillars installs only depth-1 slugs (mir-<pillar>); a tier or module has
+    # two or more dashes. Counting dashes is the same rule the naming convention encodes.
+    if [ "$SCOPE" = "pillars" ]; then
+      local dashes="${name//[^-]/}"
+      [ "${#dashes}" -eq 1 ] || continue
+    fi
+    link "${skill%/}" "$dir/$name"
+    n=$((n + 1))
   done
+  if [ "$SCOPE" = "pillars" ]; then
+    echo "  NOTE  scope=pillars: linked $n pillar(s) globally."
+    echo "        Run \`mir init --install\` in a repo to add just that repo's tiers/modules."
+  fi
 }
 
 install_agents_to() {  # install_agents_to <agents_dir>
