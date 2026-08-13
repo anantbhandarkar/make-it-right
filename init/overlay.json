@@ -1,0 +1,89 @@
+{
+  "_comment": "The ONLY hand-maintained data mir init needs. The picker options are derived from the skill tree on disk; this file adds what the tree cannot express: human labels, the lockfile/dependency signals that let detection propose an answer, and the stacks a user might pick that have no skill yet. Adding a covered stack = adding a skill (the option appears automatically). Editing this = labels and detection only.",
+
+  "pillar_labels": {
+    "frontend": "Web frontend",
+    "backend": "Backend / API",
+    "mobile": "Native mobile",
+    "database": "Database",
+    "cloud": "Cloud / infra",
+    "devsecops": "DevSecOps (always on)"
+  },
+
+  "labels": {
+    "mir-frontend-react": "React (Vite / SPA, no meta-framework)",
+    "mir-backend-python": "Python (framework not chosen)",
+    "mir-backend-node": "Node (framework not chosen)",
+    "mir-backend-bun": "Bun (framework not chosen)",
+    "mir-backend-go": "Go (framework not chosen)",
+    "mir-backend-rust": "Rust (framework not chosen)",
+    "mir-backend-jvm": "JVM / Java / Kotlin (framework not chosen)",
+    "mir-backend-dotnet": ".NET (framework not chosen)",
+    "mir-backend-ruby": "Ruby (framework not chosen)",
+    "mir-backend-php": "PHP (framework not chosen)",
+    "mir-backend-beam": "Elixir / Erlang (framework not chosen)",
+    "mir-frontend-react-next": "React + Next.js",
+    "mir-frontend-vue": "Vue 3",
+    "mir-frontend-vue-nuxt": "Vue + Nuxt",
+    "mir-frontend-vanilla": "No framework (vanilla JS / Web Components)",
+    "mir-backend-python-fastapi": "Python + FastAPI",
+    "mir-backend-python-django": "Python + Django",
+    "mir-backend-python-flask": "Python + Flask",
+    "mir-backend-node-express": "Node + Express",
+    "mir-backend-node-fastify": "Node + Fastify",
+    "mir-backend-node-nestjs": "Node + NestJS",
+    "mir-backend-bun-hono": "Bun + Hono",
+    "mir-backend-go-gin": "Go + Gin",
+    "mir-backend-go-fiber": "Go + Fiber",
+    "mir-backend-go-echo": "Go + Echo",
+    "mir-backend-rust-actix": "Rust + Actix",
+    "mir-backend-rust-axum": "Rust + Axum",
+    "mir-backend-jvm-spring": "JVM + Spring Boot",
+    "mir-backend-jvm-quarkus": "JVM + Quarkus",
+    "mir-backend-jvm-micronaut": "JVM + Micronaut",
+    "mir-backend-dotnet-aspnetcore": "ASP.NET Core",
+    "mir-backend-ruby-rails": "Ruby on Rails",
+    "mir-backend-php-laravel": "PHP + Laravel",
+    "mir-backend-php-symfony": "PHP + Symfony",
+    "mir-backend-beam-phoenix": "Elixir + Phoenix",
+    "mir-mobile-android": "Android (Kotlin / Compose)",
+    "mir-mobile-ios": "iOS (Swift / SwiftUI)",
+    "mir-database-postgres": "PostgreSQL",
+    "mir-database-mongo": "MongoDB"
+  },
+
+  "detect": {
+    "package.json": {
+      "deps": {
+        "next": "mir-frontend-react-next",
+        "nuxt": "mir-frontend-vue-nuxt",
+        "vue": "mir-frontend-vue",
+        "react": "mir-frontend-react",
+        "@nestjs/core": "mir-backend-node-nestjs",
+        "fastify": "mir-backend-node-fastify",
+        "express": "mir-backend-node-express",
+        "hono": "mir-backend-bun-hono",
+        "pg": "mir-database-postgres",
+        "postgres": "mir-database-postgres",
+        "mongodb": "mir-database-mongo",
+        "mongoose": "mir-database-mongo"
+      }
+    },
+    "requirements.txt": {"contains": {"fastapi": "mir-backend-python-fastapi", "django": "mir-backend-python-django", "flask": "mir-backend-python-flask", "psycopg": "mir-database-postgres", "pymongo": "mir-database-mongo"}},
+    "pyproject.toml": {"contains": {"fastapi": "mir-backend-python-fastapi", "django": "mir-backend-python-django", "flask": "mir-backend-python-flask"}},
+    "go.mod": {"contains": {"gin-gonic/gin": "mir-backend-go-gin", "gofiber/fiber": "mir-backend-go-fiber", "labstack/echo": "mir-backend-go-echo"}},
+    "Cargo.toml": {"contains": {"actix-web": "mir-backend-rust-actix", "axum": "mir-backend-rust-axum"}},
+    "Gemfile": {"contains": {"rails": "mir-backend-ruby-rails"}},
+    "composer.json": {"contains": {"laravel/framework": "mir-backend-php-laravel", "symfony/symfony": "mir-backend-php-symfony", "symfony/framework-bundle": "mir-backend-php-symfony"}},
+    "mix.exs": {"contains": {"phoenix": "mir-backend-beam-phoenix"}},
+    "pubspec.yaml": {"gap": {"flutter": "flutter"}},
+    "build.gradle.kts": {"gap_signal": {"kotlin": "mir-mobile-android"}}
+  },
+
+  "uncovered_note": {
+    "flutter": "Flutter is cross-platform, not in the tree. The mir-mobile pillar gates still apply; there is no Flutter framework module yet.",
+    "svelte": "Svelte has no skill. The mir-frontend pillar loads for any reactive library; verify Svelte-specific facts by live search.",
+    "deno": "Deno has no runtime tier. Closest is mir-backend-node for the shared concerns; Deno-specific APIs are not covered.",
+    "sqlite": "SQLite has no module. The mir-database pillar's schema-design gates apply; engine-specific locking/WAL details are not covered."
+  }
+}

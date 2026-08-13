@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Thin shim: `mir <cmd>` runs the make-it-right CLI. The skill is the agent-facing wrapper;
+# this is the human/CLI entrypoint. No logic lives here on purpose.
+set -euo pipefail
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+exec python3 "$here/../init/cli.py" "$@"
