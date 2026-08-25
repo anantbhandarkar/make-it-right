@@ -20,6 +20,30 @@ holds the current version as one line with no `v` prefix; the `v` belongs to the
 
 ## [Unreleased]
 
+## [2.0.1] - 2026-08-25
+
+`2.0.0` was tagged but never released: its release workflow failed on `ubuntu-latest`
+with `819 passed, 1 failed`, against `820 passed, 0 failed` on macOS. No GitHub Release
+was published for it. `2.0.1` is `2.0.0` plus that one fix; everything in the `2.0.0`
+entry below is what you get.
+
+The tag is left in place rather than moved. `RELEASING.md` says local verification exists
+so a broken release is caught before a tag "most people will treat as durable", and the
+rule does not stop applying because the person who skipped the step was the one who wrote
+it down.
+
+### Fixed
+
+- **The path-canonicalisation control asserted a macOS fact on every platform.** It checked
+  that a `tempfile`-built repo's `realpath` differs from its `abspath`, which is free on
+  macOS (`/var` -> `/private/var`) and false on Linux, where `/tmp` is already canonical.
+  The control exists because canonicalising the write target while leaving `find_repo_root`
+  on `abspath` makes the guard block everything while looking like a security win, and the
+  divergence assertion exists so the control cannot silently become vacuous. It was right to
+  fail: its premise had stopped holding. The fixture now builds the repo under a symlink it
+  creates itself, so the two paths disagree by construction everywhere, and the trap is
+  genuinely exercised on Linux instead of skipped there.
+
 ## [2.0.0] - 2026-08-25
 
 `mir init` emits a real write-policy harness for Codex and Antigravity, not only for Claude
