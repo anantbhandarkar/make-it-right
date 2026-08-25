@@ -2,6 +2,8 @@
 
 <div align="center">
 
+<img src="assets/logo.png" alt="Make It Right logo" width="240">
+
 **A practical safety layer for AI coding agents.**
 
 [What it does](#what-it-does) · [How it works](#how-it-works) · [Quick start](#quick-start) · [Project setup](#protect-one-project)
