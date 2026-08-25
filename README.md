@@ -8,6 +8,7 @@ It is not a framework or a runtime. It is a flat collection of pillar, runtime, 
 
 ## Contents
 
+- [Quickstart](#quickstart)
 - [What this solves](#what-this-solves)
 - [The eight gates](#the-eight-gates)
 - [Pillars and their differences](#pillars-and-their-differences)
@@ -16,11 +17,26 @@ It is not a framework or a runtime. It is a flat collection of pillar, runtime, 
 - [Skill inventory](#skill-inventory)
 - [Reviewer sub-agents](#reviewer-sub-agents)
 - [Validation](#validation)
+- [Tool support at a glance](#tool-support-at-a-glance)
 - [Installation](#installation)
+- [Project harness (`mir init`)](#project-harness-mir-init)
 - [Extending the repository](#extending-the-repository)
 - [Security posture](#security-posture)
 - [Honest limits](#honest-limits)
 - [License](#license)
+
+## Quickstart
+
+```bash
+git clone https://github.com/anantbhandarkar/make-it-right.git ~/src/make-it-right
+cd ~/src/make-it-right
+./install.sh --tool=claude                  # or --tool=cursor|codex|antigravity|all
+./bin/mir init /path/to/your/repo           # optional, Claude Code only: write policy + baseline
+```
+
+Restart the agent so it indexes the new resources, then describe a task in plain language — "add a checkout endpoint that charges a card and decrements inventory". The matching skills load from their descriptions; you do not have to name them. Typing `/mir-backend <task>` forces a specific one.
+
+`install.sh` does not put `bin/mir` on `PATH`, so run it by path or alias it. What each tool actually receives differs, and the differences are not cosmetic — read [Tool support at a glance](#tool-support-at-a-glance) before assuming parity.
 
 ## What this solves
 
@@ -289,6 +305,20 @@ The script performs these checks:
 
 The frontmatter parser implements only the small YAML subset used by this repository. It is not a general YAML validator. The summary reports skill, pillar, tier, module, reviewer, planned, error, and warning counts. `--quiet` suppresses warning problem lines; `--json` returns the same error status as the human mode and includes the structured stats and problems.
 
+## Tool support at a glance
+
+The four supported tools do not receive the same thing. The table states what `install.sh` and `mir init` actually deliver today, so the asymmetry is visible before you rely on it.
+
+| Capability | Claude Code | Cursor | Codex CLI | Antigravity |
+|---|---|---|---|---|
+| Skill bodies linked by `install.sh` | Yes, into `~/.claude/skills` | Yes, the same `~/.claude/skills` links | No — register them yourself | Yes, into the Antigravity skills directory |
+| Reviewer sub-agents linked | Yes, into `~/.claude/agents` | Yes, the same `~/.claude/agents` files | No — register them yourself | No files installed; checklists run inline |
+| Always-on `AGENTS.md` | Not linked by `install.sh`; `mir init` generates a per-repo one | Not linked; copy this repository's `AGENTS.md` into a project root | Yes, `~/.codex/AGENTS.md` | Yes, `~/.gemini/AGENTS.md` |
+| `mir init` harness generated | Yes | Not targeted, but Cursor reads the same `.claude/settings.json` | No | No |
+| Enforced write policy | Yes — `PreToolUse` guard plus a probe that verifies it | Conditional — only if third-party configs are enabled | Not emitted by this repository | Not emitted by this repository |
+
+Two rows deserve the sentence behind them. Cursor can load Claude Code's hooks from `.claude/settings.json` and honours exit code `2` as a block, but only when *Include third-party Plugins, Skills, and other configs* is enabled in Settings → Rules, Skills, Subagents. That setting is off unless you turn it on, so a generated harness enforces on Cursor conditionally and silently does nothing otherwise. Codex CLI and Antigravity both have a real `PreToolUse` mechanism — the tools support enforcement, `make-it-right` does not emit anything for either yet.
+
 ## Installation
 
 `install.sh` creates symlinks, not copies. Edits in the repository are therefore visible to the installed tool after the tool reloads its resources. It runs `python3 validate.py --quiet` first. Any non-zero result stops the install. If `python3` is unavailable, it warns and proceeds without validation.
@@ -311,6 +341,8 @@ ls -l ~/.claude/skills/mir-backend
 ls -l ~/.claude/agents/reliability-reviewer.md
 ```
 
+**What you get.** Skill bodies: linked globally and loaded on demand by description. Reviewer sub-agents: linked, and the pillars dispatch them natively at Gate 7. Always-on `AGENTS.md`: `install.sh` links none — run `mir init` to generate a per-repository `AGENTS.md` plus a `CLAUDE.md` that imports it. Generated write-policy harness: yes, and Claude Code is the only tool that gets one. See [Project harness](#project-harness-mir-init).
+
 ### Cursor
 
 ```bash
@@ -326,6 +358,12 @@ ls -l ~/.claude/skills/mir-backend ~/.claude/agents/security-reviewer.md
 test -f AGENTS.md
 ```
 
+**What you get.** Skill bodies: the same `~/.claude/skills` links as Claude Code. Reviewer sub-agents: the same `~/.claude/agents` files; where native sub-agent dispatch is unavailable, run each reviewer's checklist inline. Always-on `AGENTS.md`: only if you place this repository's `AGENTS.md` in the project root yourself. Generated write-policy harness: none. `mir init` emits nothing for Cursor.
+
+**The write policy is conditional here.** Cursor can load hooks configured for Claude Code and supports exit code `2` to block an action, so a `.claude/settings.json` written by `mir init` can enforce in Cursor too. It only does so when *Include third-party Plugins, Skills, and other configs* is enabled in Settings → Rules, Skills, Subagents. Until you enable it, the harness is present but inert: the gates and the `AGENTS.md` baseline are instructions the model may follow or ignore, and nothing mechanically blocks a write to a denied path.
+
+Treat this as unverified until you check it yourself. The claim comes from Cursor's documentation; this repository does not test against Cursor, and `mir init` neither detects the setting nor reports whether it is on. A harness that enforces only under a toggle you cannot see from here is not the same as one that enforces.
+
 ### Codex CLI
 
 ```bash
@@ -340,20 +378,38 @@ Verify the baseline link:
 ls -l ~/.codex/AGENTS.md
 ```
 
+**What you get.** Skill bodies: none installed by the script; register them through Codex's `/skills` configuration. Reviewer sub-agents: none installed; register them through the custom-agent configuration, and run their checklists inline until you do. Always-on `AGENTS.md`: yes, the global `~/.codex/AGENTS.md` link. Generated write-policy harness: none.
+
+**On enforcement.** Codex CLI has a real `PreToolUse` hook mechanism (`.codex/hooks.json`) and an OS-enforced sandbox, so a write policy is enforceable on this tool. `make-it-right` does not generate either yet. The tool supports it; `mir init` does not emit it. Until it does, nothing in this repository enforces the write policy on Codex.
+
 ### Antigravity
 
 ```bash
 ./install.sh --tool=antigravity
 ```
 
-Default targets are `~/.gemini/antigravity/skills/<skill-name>` and `~/.gemini/AGENTS.md`. When native sub-agent dispatch is unavailable, the baseline directs the tool to run reviewer checklists inline.
+Default targets are `~/.gemini/config/skills/<skill-name>` and `~/.gemini/AGENTS.md`. When native sub-agent dispatch is unavailable, the baseline directs the tool to run reviewer checklists inline.
+
+Releases up to and including `v1.0.0` linked into `~/.gemini/antigravity/skills` instead. Neither installed Antigravity product reads that path, so those installs loaded nothing. `antigravity/` is the legacy Antigravity 2.0 product directory; global user skills moved to `~/.gemini/config/skills`, which both the CLI and the IDE read. If you installed before this change, the old location holds dead links. Remove only the symlinks this repository created, and look under your own `GEMINI_HOME` if you set one:
+
+```bash
+find "${GEMINI_HOME:-$HOME/.gemini}/antigravity/skills" -maxdepth 1 -type l -name 'mir-*' -delete
+```
+
+`-type l` matters: it deletes symlinks and nothing else, so a real directory that happens to match `mir-*` is left alone. Re-run the install command above afterwards.
 
 Verify both link types:
 
 ```bash
-ls -l ~/.gemini/antigravity/skills/mir-backend
+ls -l ~/.gemini/config/skills/mir-backend
 ls -l ~/.gemini/AGENTS.md
 ```
+
+**What you get.** Skill bodies: linked into the skills directory named above. Reviewer sub-agents: no `agents/` files are installed; the baseline directs the tool to run the reviewer checklists inline. Always-on `AGENTS.md`: yes, the `~/.gemini/AGENTS.md` link. Generated write-policy harness: none. `mir init` emits nothing for Antigravity, so the write policy this repository can generate does not reach this tool.
+
+**On enforcement.** Antigravity has a real `PreToolUse` hook, and it fires on file-write tools, not only on `run_command` — verified against the shipped binaries rather than the documentation, whose examples all use `run_command`. So a write policy is enforceable here. `make-it-right` does not generate one yet. The tool supports it; `mir init` does not emit it.
+
+One property matters if you write your own hook: Antigravity's harness fails open. A hook that exits non-zero, or carries a matcher that will not compile, is logged and skipped, and the write proceeds. Timeout behaviour was not tested and is assumed to take the same path. A guard for this tool has to be fail-closed inside itself, because the host will not close for it.
 
 ### All supported installations
 
@@ -364,6 +420,114 @@ ls -l ~/.gemini/AGENTS.md
 This runs the Claude, Codex, and Antigravity installers. Cursor uses the Claude resources and does not have a separate install pass.
 
 After any installation, restart the agent so it indexes the changed resources. Run `./validate.py` independently when you want the warnings as well as the error status.
+
+### Install scope and token cost
+
+`--scope` controls how much of the tree lands in the global configuration. It combines with `--tool`.
+
+```bash
+./install.sh --scope=all       # default: link every skill globally
+./install.sh --scope=pillars   # link only the depth-1 pillar skills
+```
+
+The reason to care is the Level 1 index described in [Progressive disclosure and token cost](#progressive-disclosure-and-token-cost). A host reads every installed skill's `name` and `description` at session start, in every repository, whether or not that skill is relevant. Skill bodies stay lazy; the index does not.
+
+| Scope | What is linked globally | Index cost per session |
+|---|---|---|
+| `all` (default) | Every directory under `skills/`. | About 15 thousand tokens. |
+| `pillars` | Only the depth-1 slugs — a name with exactly one hyphen, which is how the naming convention encodes a pillar. | About 2 thousand tokens. |
+
+Both figures are approximations measured by summing the `name` and `description` characters of the linked tree. Measure your own install rather than quoting these if the number has to be exact.
+
+**The progressive model.** Install the pillar floor once, globally, and let each repository top itself up with only the tiers and modules it uses:
+
+```bash
+./install.sh --tool=claude --scope=pillars   # once: every repo gets the gates
+./bin/mir init /path/to/repo --install       # per repo: that repo's tiers and modules
+```
+
+`mir init --install` symlinks the resolved tiers and modules into `<repo>/.claude/skills/` and removes `mir-*` links that the repository's current stack no longer resolves, so a stack change does not leave the old stack loading forever. Depth-1 slugs are skipped locally because they already come from the global floor. Claude Code merges `~/.claude/skills` with `<repo>/.claude/skills`, so the two combine.
+
+A repository that never runs `mir init` still gets the pillar gates. That is the intended degradation: fewer skills, not none. `--install` is Claude Code only, like the rest of `mir init`.
+
+## Project harness (`mir init`)
+
+`install.sh` puts skills on the machine. `mir init` prepares one repository: it records the confirmed stack, writes a thin always-on baseline, and generates a write policy plus the hook that enforces it. It installs no software and writes no application code, because an agent that installs software is the exact thing a containment harness exists to stop.
+
+`install.sh` never links `bin/mir` onto `PATH`, so there is no bare `mir` command until you make one. Run the CLI by path, or alias the shim:
+
+```bash
+python3 init/cli.py init .                 # from the make-it-right checkout
+~/src/make-it-right/bin/mir init .         # the same CLI through the shim, by absolute path
+alias mir='~/src/make-it-right/bin/mir'    # optional; then `mir init .` works
+```
+
+### What it does
+
+Five steps, in order. Each exists because the step before it can be wrong.
+
+1. **Detect.** Reads `package.json`, `go.mod`, `Cargo.toml`, `requirements.txt`, `pyproject.toml`, `Gemfile`, `composer.json`, `mix.exs`, and `*.xcodeproj`. Detection proposes with a stated reason and a confidence; it never decides silently. Two frameworks in one pillar is a conflict to resolve, not a guess to make.
+2. **Confirm.** The picker's options are derived from the installed skill tree, so they cannot drift from what exists. A stack with no matching skill is an explicit choice recorded as a gap, never dropped. The picker is presented by the `/mir-init` skill, which asks the questions through the agent. Running `init/cli.py` directly does **not** prompt: it takes the detected proposal for each pillar and proceeds. Use `--answers` to state the stack explicitly, or `--noninteractive`, which refuses to guess when detection is ambiguous rather than picking one.
+3. **Resolve.** The confirmed answers map to a coarse-to-fine skill set — pillar, then tier, then module. `mir-devsecops` is always included, so security is not an opt-in.
+4. **Generate.** Writes the files in the table below.
+5. **Verify.** Runs `.mir/probe.py` against the generated guard. The probe derives its attacks from the manifest, so it tests your policy rather than a fixed list, and a missing guard is a hard error rather than a silent pass. Read its exit status precisely: it fails only on a leak — a denied path that reached the target. Positive controls are reported but do not gate the status, so a guard that blocks everything, including writes it should allow, still exits `0`. Read the report, not just the exit code.
+
+### Commands
+
+```bash
+python3 init/cli.py init .                                          # the full five steps
+python3 init/cli.py init . --dry-run                                # print the plan, write nothing
+python3 init/cli.py init . --answers answers.json --noninteractive  # scripted, no picker
+python3 init/cli.py init . --install                                # also link this repo's tiers/modules
+python3 init/cli.py detect .                                        # show what the repo looks like
+python3 init/cli.py catalog                                         # print the derived picker as JSON
+python3 .mir/probe.py --repo .                                      # re-check an existing harness
+```
+
+`--noninteractive` fails on an ambiguous detection rather than guessing; pass `--answers` with an explicit choice. `--dry-run` writes nothing at all, including the probe step.
+
+### What it writes
+
+| File | What it is |
+|---|---|
+| `AGENTS.md` | The thin baseline: the pillars that apply here, the one hard rule, and the recorded stack. Never skill content. Anything below the ownership marker is preserved on re-run. |
+| `CLAUDE.md` | An `@AGENTS.md` import plus room for repository notes. |
+| `.mir/manifest.json` | The write policy: allowed roots, denied paths, the recorded stack, and the resolved skills. |
+| `.mir/guard.py` | The `PreToolUse` hook that enforces the manifest. It lives under `.mir/`, which is itself a denied path, so the agent cannot rewrite the guard to widen its own permissions. |
+| `.mir/probe.py` | The manifest-derived verifier, so anyone can re-check with `python3 .mir/probe.py --repo .`. |
+| `.claude/settings.json` | Registers the hook. Merged, not overwritten, so an existing hook set survives. |
+
+Re-running is idempotent: files above the ownership marker regenerate and your edits below it stay.
+
+### It is Claude Code only
+
+Every enforcement artifact in that table — `.claude/settings.json`, `.mir/guard.py`, `.mir/probe.py`, and the manifest they read — is consumed by Claude Code. `mir init` emits nothing for Cursor, Codex CLI, or Antigravity: no `.codex/hooks.json`, no Cursor rule file, no Antigravity equivalent. The generated `AGENTS.md` is the one artifact those tools can still read, and an `AGENTS.md` is a set of instructions, not an enforcement mechanism.
+
+So running `mir init` in a repository you drive with one of the other three gives you a baseline and a manifest that nothing enforces. Cross-tool generation is planned; it is not shipped.
+
+### Restart before you rely on the guard
+
+Claude Code snapshots hooks at session start. The `.claude/settings.json` that `mir init` just wrote therefore does not protect the session that generated it. Restart Claude Code and approve the new settings first. `mir init` prints this at the end of every run for the same reason it is repeated here: a harness you believe is live and is not is worse than no harness.
+
+### What the guard actually covers
+
+The policy is deny-by-default outside the allowed roots, and a denied path wins even inside an allowed root — so `src/.env` is blocked though `src` is writable. `.git`, `.mir`, `.claude/settings.json`, `**/.env*`, and the SSH, cloud, kube, and agent-tool config directories under `$HOME` are denied by default. The policy protecting itself is asserted by the probe, not assumed.
+
+A denied entry is matched one of two ways, and the difference is worth knowing. A literal entry is a path prefix from the repository root: it protects that path and everything beneath it, and nothing else. An entry containing glob metacharacters is matched as a pattern at any depth, which is what `**/.env*` needs in order to cover `src/.env`, `.env.development`, and `a/b/.env.local` rather than only the exact root file. Releases up to `v1.0.0` listed the three literals `.env`, `.env.local`, and `.env.production`, so secrets at any other depth or suffix were writable while this section claimed otherwise. `.envrc` and `.env.example` are also denied: direnv exports live credentials, and a template filled in place is a common way a real key reaches a repository.
+
+Two limits to read literally. `.claude/settings.json` is denied, but `.claude/` as a whole is not — `.claude/skills/` has to stay writable for `mir init --install`, so `.claude/settings.local.json` is currently writable even though the host reads it. And a clean probe run proves the guard enforces the paths the probe tested; it is not evidence about the paths it did not. The report prints both lists for that reason.
+
+Coverage of the *tools* is partial by construction, and the guard reports that rather than implying more:
+
+| Tool | Coverage | Why |
+|---|---|---|
+| `Write`, `Edit`, `MultiEdit`, `NotebookEdit`, `Update` | Full | The write target is a structured path field the guard can read directly. |
+| `Bash` | Partial | The target is inside a shell string. The guard matches explicit `>`, `>>`, `tee`, `dd of=`, `cp`, `mv`, and `install` forms. A shell can hide a write from a regex — `eval`, a script, a heredoc to a variable path — so a clean Bash result is not proof. |
+| MCP tool writes, `apply_patch`, other specialized write tools | None | Not parsed at all. |
+
+The guard also fails open on its own errors. A missing manifest or unparseable JSON allows the call and says so on stderr, because a policy that bricks the agent when the policy has a bug is worse than one that is honest about not being loaded.
+
+A clean probe proves the guard enforces the paths the probe tested. It does not prove the untested paths are safe, which is why the probe prints its own blind spots beside its results. Read the two lists together.
 
 ## Extending the repository
 
