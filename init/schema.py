@@ -25,14 +25,31 @@ because a prefix cannot express "at any depth" and a secrets file has no fixed d
 `.env` as a prefix denies exactly the repo-root `.env` and leaves `src/.env` writable, which
 is how a false security claim shipped in v1.0.0. Literal entries keep their old meaning
 exactly, so a manifest written before globs existed still validates and still denies the
-same set; MANIFEST_VERSION therefore stays 1.
+same set.
+
+MANIFEST_VERSION is 2 as of v2.0.0. The bump is the release's stated breaking change and it
+buys one thing: a `targets` block, so a harness can record WHICH hosts it was generated for
+and probe.py can read the declared set from the harness instead of from whoever last typed a
+flag. A target cannot be dropped from verification by re-running the probe with narrower
+arguments.
+
+A v1 manifest still VALIDATES -- see SUPPORTED_VERSIONS. That is not a softening of the
+breaking change; it is where the breaking change actually bites. The guard compares versions
+and fails OPEN on a mismatch, so a v1 manifest beside a v2 guard enforces nothing, loudly.
+Making validate_manifest reject v1 as well would turn "your harness is stale, regenerate it"
+into "your harness is malformed", which sends the reader to the wrong repair.
 
 No third-party dependencies. Standard library only, to match validate.py and install.sh.
 """
 
 from __future__ import annotations
 
-MANIFEST_VERSION = 1
+MANIFEST_VERSION = 2
+
+# Versions this schema can still READ. A v1 manifest predates cross-agent init and declared
+# Claude Code implicitly; probe.declared_targets reads "no targets block" as exactly that,
+# so an old harness keeps verifying the target it always had rather than verifying nothing.
+SUPPORTED_VERSIONS = (1, 2)
 
 # Paths that are never a legitimate write target for a coding agent, added to every
 # project policy unless the caller opts out. Repo-relative entries resolve against the
@@ -66,6 +83,21 @@ BASELINE_DENIED = [
     "~/.gitconfig",
     "~/.claude",      # do not let a project agent rewrite the tool's own config
     "~/.codex",
+    # Cross-agent init hands the agent two more files it could disarm itself through, so both
+    # are denied REPO-LOCALLY -- which is what makes them rows the probe can label `rule`. A
+    # `~/`-rooted entry sits outside every allowed root, so deny-by-default blocks it whether
+    # or not the entry works; it is a real denial and it is NOT coverage of itself.
+    ".codex",         # .codex/hooks.json registers the Codex guard; unregistering it is not an edit
+    # Denied WHOLESALE, including .agents/skills. The generator runs outside the agent's tool
+    # loop, so `mir init` can still write .agents/hooks.json here; the agent has no legitimate
+    # reason to edit skill definitions or its own hook registration mid-task. Denying only
+    # .agents/hooks.json would leave the skills beside it rewritable, which is the same hole
+    # one directory over.
+    ".agents",
+    # Antigravity's home config. `deny-by-default` by the probe's own labelling, like every
+    # other `~/`-rooted entry: a real denial that buys a row which cannot fail. Added because
+    # it is real, not because it adds coverage.
+    "~/.gemini",
 ]
 
 KINDS = ("project-policy", "task-policy")
@@ -92,11 +124,17 @@ def empty_policy() -> dict:
     }
 
 
-def project_manifest(repo_name: str, allowed_write_roots=None, extra_denied=None) -> dict:
+def project_manifest(repo_name: str, allowed_write_roots=None, extra_denied=None,
+                     targets=None) -> dict:
     """A baseline project policy: work inside the repo, never touch secrets or tool config.
 
     allowed_write_roots defaults to the repo root ("."), i.e. anywhere in the repo except
     the denied paths. A task policy later narrows this to the feature's actual directories.
+
+    `targets` is the v2 block: {name: {protocol, wiring_files, write_policy_enforcement}}.
+    Omitted rather than written empty when there is nothing to record, because "no targets
+    block" already has a meaning -- probe.declared_targets reads it as the implicit Claude
+    Code of every v1 harness -- and an empty dict would be a third state nothing understands.
     """
     policy = empty_policy()
     policy["allowed_write_roots"] = list(allowed_write_roots) if allowed_write_roots else ["."]
@@ -105,7 +143,7 @@ def project_manifest(repo_name: str, allowed_write_roots=None, extra_denied=None
         "no writes outside allowed_write_roots",
         "no writes to any denied_path, even inside an allowed root",
     ]
-    return {
+    manifest = {
         "mir_manifest_version": MANIFEST_VERSION,
         "kind": "project-policy",
         "repo": repo_name,
@@ -114,6 +152,9 @@ def project_manifest(repo_name: str, allowed_write_roots=None, extra_denied=None
         # generated_at is stamped by the CLI at write time; scripts cannot read the clock.
         "policy": policy,
     }
+    if targets:
+        manifest["targets"] = dict(targets)
+    return manifest
 
 
 def example_manifest() -> dict:
@@ -126,6 +167,45 @@ def example_manifest() -> dict:
     return m
 
 
+def _validate_targets(raw) -> list:
+    """Errors in the v2 `targets` block. An ABSENT block is not an error -- see
+    project_manifest for why "no block" already means "the implicit Claude Code of v1".
+
+    Shape-tolerant in the same two shapes probe.declared_targets accepts, and for the same
+    reason: the probe is copied standalone into a project and outlives the generator that
+    wrote the manifest beside it. A validator stricter than the reader would reject manifests
+    the thing that reads them handles perfectly well.
+    """
+    if raw is None:
+        return []
+    errs: list = []
+    if isinstance(raw, dict):
+        items = list(raw.items())
+    elif isinstance(raw, list):
+        items = [(t, {}) if isinstance(t, str) else (None, t) for t in raw]
+    else:
+        return ["manifest 'targets' must be an object or a list of names, got %s"
+                % type(raw).__name__]
+    if not items:
+        # An empty block is a third state: it reads as "no targets declared", which is a
+        # harness that verifies nothing while looking configured. Omit the key instead.
+        return ["manifest 'targets' is present but empty; omit the key to mean 'claude'"]
+    for name, spec in items:
+        if isinstance(spec, dict) and name is None:
+            name = spec.get("name")
+        if not isinstance(name, str) or not name:
+            errs.append("a targets entry has no usable name: %r" % (spec,))
+            continue
+        if spec is None or isinstance(spec, dict):
+            proto = (spec or {}).get("protocol")
+            if proto is not None and (not isinstance(proto, str) or not proto):
+                errs.append("targets.%s.protocol is %r, expected a non-empty string"
+                            % (name, proto))
+        else:
+            errs.append("targets.%s is %s, expected an object" % (name, type(spec).__name__))
+    return errs
+
+
 def validate_manifest(obj) -> list[str]:
     """Return a list of human-readable errors. Empty list means the manifest is usable."""
     errs: list[str] = []
@@ -133,8 +213,10 @@ def validate_manifest(obj) -> list[str]:
         return ["manifest is not a JSON object"]
 
     v = obj.get("mir_manifest_version")
-    if v != MANIFEST_VERSION:
-        errs.append(f"mir_manifest_version is {v!r}, expected {MANIFEST_VERSION}")
+    if v not in SUPPORTED_VERSIONS:
+        errs.append(f"mir_manifest_version is {v!r}, expected one of {SUPPORTED_VERSIONS}")
+
+    errs += _validate_targets(obj.get("targets"))
 
     kind = obj.get("kind")
     if kind not in KINDS:

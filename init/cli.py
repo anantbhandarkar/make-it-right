@@ -29,6 +29,7 @@ sys.path.insert(0, HERE)
 import catalog  # noqa: E402
 import detect as detect_mod  # noqa: E402
 import generate as gen  # noqa: E402
+import targets as targets_pkg  # noqa: E402
 import _version  # noqa: E402
 
 
@@ -129,6 +130,21 @@ def cmd_init(args) -> int:
         print(f"no such repo: {repo}", file=sys.stderr)
         return 2
 
+    # 0. targets. Resolved BEFORE detection, because an unknown --target must cost nothing:
+    # a typo'd host name that ran a full detect and then failed would have spent the user's
+    # time to tell them a flag was wrong. An unknown name is refused rather than dropped --
+    # `--target codx` must not quietly produce a Claude-only harness the user believes covers
+    # Codex.
+    try:
+        targets = targets_pkg.resolve(args.target)
+    except ValueError as e:
+        print(f"mir init: {e}", file=sys.stderr)
+        return 3
+    print("Targets: " + ", ".join(t.name for t in targets))
+    for t in targets:
+        print(f"  {t.summary}")
+    print()
+
     # 1. detect
     det = detect_mod.detect(repo)
     print(detect_mod.render(det))
@@ -177,7 +193,7 @@ def cmd_init(args) -> int:
     # byte lands: a partial harness is worse than none, because it looks installed.
     stamp = _stamp()
     try:
-        items = gen.plan(repo, res["skills"], answers, stamp)
+        items = gen.plan(repo, res["skills"], answers, stamp, targets)
         if args.dry_run:
             print("--dry-run: would write these files (nothing written):")
             for it in items:
@@ -201,12 +217,27 @@ def cmd_init(args) -> int:
     for w in gen.local_settings_warnings(repo):
         print(f"  WARN  {w}", file=sys.stderr)
 
+    # 4a. what each target could not do for itself. Printed on every real run, because a
+    # target that emits no enforcement file (Cursor) or emits one nobody has watched fire
+    # (Codex, Antigravity) is exactly the thing a user must not learn about later.
+    for t in targets:
+        for n in t.notes(gen.targets_pkg.Context(
+                repo=repo, repo_name=os.path.basename(repo), resolved=res["skills"],
+                answers=answers, stamp=stamp, guard_rel=".mir/guard.py",
+                target_names=[x.name for x in targets])):
+            print(f"  NOTE  {n}")
+    print()
+
     # 4b. optional: scope this repo's skills locally
     if args.install:
         repo_dir = os.path.dirname(HERE)
-        linked = gen.install_project_skills(repo, res["skills"], repo_dir)
-        removed = gen.prune_project_skills(repo, res["skills"])
-        print(f"Linked {len(linked)} project skill(s) into .claude/skills/:")
+        # Every selected target's skill directory, install AND prune. Pruning only
+        # .claude/skills while installing into .agents/skills too is how a repo accumulates a
+        # dead stack's gates in the directory nobody thinks to look in.
+        dirs = gen.skill_dirs_for(targets)
+        linked = gen.install_project_skills(repo, res["skills"], repo_dir, dest_dirs=dirs)
+        removed = gen.prune_project_skills(repo, res["skills"], dest_dirs=dirs)
+        print(f"Linked {len(linked)} project skill(s) into {', '.join(dirs)}:")
         for s in linked:
             print(f"  {s}")
         if removed:
@@ -220,9 +251,9 @@ def cmd_init(args) -> int:
     print("Verifying the generated guard against its manifest...")
     rc = subprocess.call([sys.executable, probe, "--repo", repo])
     print()
-    print("Note: Claude Code snapshots hooks at session start, so the hook does NOT protect")
-    print("the current session. Restart Claude Code (and approve the new .claude/settings.json)")
-    print("for the guard to take effect.")
+    print("Read .mir/COVERAGE.md before relying on this harness: it names, per target, what")
+    print("the probe proved and what it did NOT. A clean probe proves the guard decides")
+    print("correctly and that a registration file exists. It cannot prove a host read it.")
     msg = probe_message(rc)
     if msg:
         print("\n" + msg, file=sys.stderr)
@@ -285,6 +316,14 @@ def main() -> int:
     p_init.add_argument("--install", action="store_true",
                         help="symlink this repo's tiers/modules into .claude/skills/ "
                              "(pairs with ./install.sh --scope=pillars)")
+    # The resolved list is written into the MANIFEST, not just used here. That is the point
+    # of the flag rather than a side effect of it: probe.py reads the declared set from the
+    # manifest, so a target cannot be dropped from verification by re-running the probe with
+    # narrower arguments than the run that installed the harness.
+    p_init.add_argument("--target", default=targets_pkg.DEFAULT,
+                        help="comma-separated hosts to emit a harness for: %s, or `all` "
+                             "(default: %s). An unknown name is refused, never dropped."
+                             % (", ".join(targets_pkg.NAMES), targets_pkg.DEFAULT))
     p_init.add_argument("--noninteractive", action="store_true",
                         help="never prompt. Ambiguity is a hard stop in BOTH modes; this flag "
                              "only forbids asking, it never licenses a guess")

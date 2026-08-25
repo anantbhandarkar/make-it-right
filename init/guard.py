@@ -1,10 +1,44 @@
 #!/usr/bin/env python3
 """PreToolUse guard: the runtime enforcement mir init emits into a project.
 
-Claude Code runs this before a tool call, passing the call as JSON on stdin. The guard
-reads the project's .mir/manifest.json and decides whether the write is allowed. It is
-data-driven on purpose: mir copies this one file into the project and the policy lives in
-the manifest, so regenerating the policy never rewrites the guard.
+A host runs this before a tool call, passing the call as JSON on stdin. The guard reads the
+project's .mir/manifest.json and decides whether the write is allowed. It is data-driven on
+purpose: mir copies this one file into the project and the policy lives in the manifest, so
+regenerating the policy never rewrites the guard.
+
+`--protocol` says WHICH host is asking. It is required, and a missing or unknown value is a
+hard error -- exit 3, enforcing nothing and saying so. There is deliberately no default.
+Defaulting to `claude` is precisely how a mis-wired Codex hook runs the Claude adapter, finds
+no field it recognises, extracts zero write targets, and allows every write while reporting a
+clean run. An exit 3 is visible; a silent zero-target parse is not.
+
+The policy engine below is target-neutral and unchanged: decide(), resolve(), canonical(),
+_is_under(), find_repo_root() and load_manifest() do not know a protocol exists. What the
+protocol selects is only the two ends -- how an event is read, and how a verdict is said:
+
+  claude       stdin fields tool_name / tool_input. BLOCK is exit 2 + stderr.
+  cursor       Claude Code's configuration read by a different product, so: Claude's
+               protocol, exactly. It has no hook of its own; see targets/cursor.py.
+  codex        the same stdin field names as Claude, plus `apply_patch`, whose body names
+               its own files in `*** Add File:` / `*** Update File:` / `*** Delete File:`
+               headers. BLOCK is exit 2 + stderr. An apply_patch body that will NOT parse
+               returns deny -- never `ask`, which Codex treats as unsupported and continues
+               past, so `ask` is fail-open wearing a careful decision's clothes.
+  antigravity  toolCall.name / toolCall.args. BLOCK is `{"decision": "deny"}` on STDOUT with
+               EXIT 0, because the host ignores the exit code entirely. An adapter that
+               "just exits 2 as well" here has enforced nothing.
+
+The antigravity adapter is FAIL-CLOSED and every other adapter is fail-open, and that
+difference is a fact about the hosts rather than a preference. Claude Code surfaces a hook
+error to the user, so failing open there is loud. Antigravity LOGS a hook error and SKIPS the
+hook -- nonzero exit, uncompilable matcher, timeout, any of them -- and the write proceeds,
+so failing open there is silent. Hence the top-level catch that still emits deny-JSON, no
+dependency on anything that may be missing (this file is stdlib-only and standalone), and no
+network, subprocess or filesystem work beyond reading one JSON manifest, which keeps it far
+under the 30s default hook timeout. A timed-out hook is a skipped hook.
+
+One exception is stated rather than hidden: a manifest version this guard does not understand
+fails OPEN on EVERY protocol, antigravity included. See GUARD_MANIFEST_VERSION below.
 
 Decision, matching schema.py's model:
   - block if the target is under any denied_path (even inside an allowed root)
@@ -36,9 +70,6 @@ cannot say "at any depth", and that is the only shape a secrets rule has: `.env`
 denies the repo-root `.env` and nothing else, leaving `src/.env` writable. Literal entries
 are still compared exactly as before, so an older manifest denies exactly what it used to.
 
-Blocking is exit code 2 with a reason on stderr, which is the documented Claude Code way to
-stop a tool call and feed the reason back to the model.
-
 Coverage, stated honestly because both plan reviewers demanded it:
   - Write / Edit / MultiEdit / NotebookEdit: the file path is a structured field; fully covered.
   - Bash: the write target is inside a shell string. The guard splits the command into
@@ -62,16 +93,24 @@ Coverage, stated honestly because both plan reviewers demanded it:
         quietly, so they are listed rather than guessed at.
       * a shell function, alias, or `$PATH` shadow that renames a verb: `tee` is read as tee
         by its name, and a name is not a promise.
-  - Everything else (MCP tool writes, apply_patch, specialized tools): NOT covered here.
+  - apply_patch (codex only): the patch headers name the files, so those ARE read. A body
+    that will not parse is denied rather than allowed.
+  - antigravity tools OUTSIDE the known write set: reached anyway, because the matcher is
+    `*`. The guard reads path-shaped and command-shaped arguments off them and reports
+    PARTIAL coverage, which over-blocks rather than allowing an unread call.
+  - Everything else (MCP tool writes, specialized tools on the exit-code hosts): NOT covered.
 
-The guard fails OPEN on its own errors (missing manifest, bad JSON) rather than blocking all
-work, and says so on stderr. A policy that bricks the agent when it has a bug is worse than
-one that is honest about not being loaded. Fail-closed is a deliberate later option.
+On its own errors -- missing manifest, bad JSON, an unreadable event -- the guard fails OPEN
+on the exit-code hosts and says so on stderr. A policy that bricks the agent when it has a
+bug is worse than one that is honest about not being loaded, and on those hosts the failure
+is visible. On antigravity it fails CLOSED, for the reason at the top of this docstring: there
+the same failure is invisible and the write lands.
 
-Manifest version is the same trade. This file is COPIED standalone into .mir/ and cannot
-import schema.py, so it carries GUARD_MANIFEST_VERSION as a constant and compares it against
-the manifest's `mir_manifest_version`. On a mismatch it complains on stderr on EVERY
-invocation and still allows: a frozen v1 guard cannot know what a v2 manifest means, and a
+Manifest version is the same trade, and it is the one place antigravity does NOT fail closed.
+This file is COPIED standalone into .mir/ and cannot import schema.py, so it carries
+GUARD_MANIFEST_VERSION as a constant and compares it against the manifest's
+`mir_manifest_version`. On a mismatch it complains on stderr on EVERY invocation and still
+allows -- on every protocol: a frozen v1 guard cannot know what a v2 manifest means, and a
 colleague's v2 manifest must not brick a user's agent inside their own repo. Verification is
 where a version mismatch fails closed -- the probe owns that. There is deliberately no
 hardcoded fallback denylist for the mismatch case, because a denial the manifest does not
@@ -81,6 +120,7 @@ to prevent.
 
 from __future__ import annotations
 
+import argparse
 import fnmatch
 import json
 import os
@@ -91,9 +131,36 @@ import sys
 ALLOW = 0
 BLOCK = 2
 
+# A third code, and it is not a verdict. 3 means "this guard was not told which host is
+# asking, so it read nothing and decided nothing". Deliberately NOT 2: 2 is a block, and a
+# guard that blocks every write because its command line is wrong would look like a working
+# policy while the real finding -- a stale hook registration -- stayed invisible. Only exit 2
+# stops a tool call on Claude Code and Codex, so a cached v1 command that exits 3 is fail-open
+# until the session restarts. probe.py's `(command)` row is what makes that a wiring FAILURE
+# rather than a silent one.
+PROTOCOL_ERROR = 3
+
 # The manifest shape this copy of the guard understands. Kept in sync with
 # schema.MANIFEST_VERSION by a test, because the guard cannot import schema.
-GUARD_MANIFEST_VERSION = 1
+GUARD_MANIFEST_VERSION = 2
+
+# The hosts this guard can answer for. A protocol outside this set is a hard error, never a
+# fallback -- see the module docstring for why a default here allows everything quietly.
+#
+# `cursor` is present and speaks Claude's semantics because Cursor reads Claude Code's
+# configuration; it registers no hook of its own, so this entry exists for a hand-wired
+# command rather than for anything `mir init` writes.
+PROTOCOLS = ("claude", "codex", "antigravity", "cursor")
+
+# Which channel each host reads a verdict off. This mirrors probe.PROTOCOL_CHANNEL and is
+# duplicated for the same reason is_glob is: this file is COPIED standalone into .mir/ and has
+# nothing to import from. The two are pinned to each other by init/test_guard.py.
+STDOUT_PROTOCOLS = ("antigravity",)
+
+# Hosts where a failed hook is a SKIPPED hook, so the adapter must answer deny rather than
+# nothing. Listed rather than inferred: inheriting the wrong posture here is silent, and
+# silence is the whole failure mode.
+FAIL_CLOSED_PROTOCOLS = ("antigravity",)
 
 # Tools whose write target is a clean structured field.
 #
@@ -513,6 +580,28 @@ def decide(target_lex: str, target_can: str, policy: dict, repo_root: str) -> tu
     return BLOCK, f"{target_can} is outside every allowed_write_root"
 
 
+def shell_targets(cmd: str) -> list[str]:
+    """Every write destination a shell command names. Split out of targets_from_event so the
+    antigravity `run_command` tool reads through exactly the same parser as Bash does -- a
+    second copy of this would be a second place to lose a verb family from."""
+    found: list[str] = []
+    # Union, not replacement: the segment parser finds targets the regexes lose (a second
+    # `tee` operand, a `cp` that is not the last command on the line), and the regexes are
+    # kept so no command that blocked before this parser existed can start passing.
+    for pat in _SHELL_WRITE_PATTERNS:
+        found += [m.group(1) for m in pat.finditer(cmd)]
+    for seg in split_segments(cmd):
+        found += segment_targets(seg)
+    # deduplicate, drop obvious non-paths
+    seen, out = set(), []
+    for t in found:
+        t = t.strip().strip("'\"")
+        if t and t not in seen and not t.startswith("-"):
+            seen.add(t)
+            out.append(t)
+    return out
+
+
 def targets_from_event(tool_name: str, tool_input: dict) -> tuple[list[str], bool]:
     """Return (write targets, fully_covered). fully_covered=False means partial coverage."""
     if tool_name in PATH_FIELD_TOOLS:
@@ -521,68 +610,344 @@ def targets_from_event(tool_name: str, tool_input: dict) -> tuple[list[str], boo
         return ([val] if isinstance(val, str) else [], True)
 
     if tool_name == "Bash":
-        cmd = tool_input.get("command", "")
-        found: list[str] = []
-        # Union, not replacement: the segment parser finds targets the regexes lose (a second
-        # `tee` operand, a `cp` that is not the last command on the line), and the regexes are
-        # kept so no command that blocked before this parser existed can start passing.
-        for pat in _SHELL_WRITE_PATTERNS:
-            found += [m.group(1) for m in pat.finditer(cmd)]
-        for seg in split_segments(cmd):
-            found += segment_targets(seg)
-        # deduplicate, drop obvious non-paths
-        seen, out = set(), []
-        for t in found:
-            t = t.strip().strip("'\"")
-            if t and t not in seen and not t.startswith("-"):
-                seen.add(t)
-                out.append(t)
-        return (out, False)  # Bash is never "fully covered"
+        return (shell_targets(tool_input.get("command", "")), False)
 
     return ([], True)  # tools that do not write files: nothing to guard here
 
 
-def main() -> int:
-    try:
-        event = json.load(sys.stdin)
-    except Exception as e:
-        print(f"mir-guard: could not parse hook input, allowing ({e})", file=sys.stderr)
-        return ALLOW
+# ------------------------------------------------------------------ codex: apply_patch
+#
+# Codex's apply_patch carries its own file list in the patch header, which is the ONLY place
+# the write target appears -- there is no structured field to read. The three verbs are
+# spelled exactly as the format writes them.
+_PATCH_FILE = re.compile(r"^\*\*\*\s+(?:Add|Update|Delete)\s+File:\s*(.+?)\s*$", re.M)
+# A rename writes a SECOND path. Missing it would let `*** Update File: src/x` +
+# `*** Move to: .git/config` land the write somewhere the first header never named.
+_PATCH_MOVE = re.compile(r"^\*\*\*\s+Move\s+to:\s*(.+?)\s*$", re.M)
 
+# Where a patch body turns up. Shape-tolerant because the field name is the host's, not mir's;
+# what matters is finding the body, not knowing which key held it.
+_PATCH_KEYS = ("patch", "input", "diff", "content", "body", "command", "arguments")
+_APPLY_PATCH_TOOLS = ("apply_patch", "applypatch", "apply-patch")
+_PATCH_SENTINEL = "*** Begin Patch"
+
+
+def patch_body(tool_name: str, tool_input: dict):
+    """The apply_patch body in this event, or None if this is not an apply_patch event.
+
+    None and "" are different answers and the caller depends on it: None means "some other
+    tool, judge it normally", "" means "an apply_patch call whose body is missing", which is
+    unparseable and therefore denied. Collapsing them would turn every unreadable patch into
+    an ordinary allow.
+    """
+    named = str(tool_name or "").strip().lower() in _APPLY_PATCH_TOOLS
+    if isinstance(tool_input, dict):
+        for key in _PATCH_KEYS:
+            val = tool_input.get(key)
+            if isinstance(val, str) and _PATCH_SENTINEL in val:
+                return val
+    if not named:
+        return None
+    for key in _PATCH_KEYS:
+        val = (tool_input or {}).get(key) if isinstance(tool_input, dict) else None
+        if isinstance(val, str):
+            return val
+    return ""
+
+
+def patch_targets(body: str) -> tuple[list[str], bool]:
+    """(paths the patch writes, parsed). parsed=False means the body named no file at all.
+
+    A body that names no file is NOT an empty write set. It is a patch this guard could not
+    read, and the caller turns that into a DENY -- never an allow, and never `ask`: Codex
+    treats an unsupported decision as "continue", so answering `ask` is allowing the write
+    while looking like a careful deferral. An unread write that reads as allowed is exactly
+    the laundering this repository exists to prevent.
+    """
+    paths = _PATCH_FILE.findall(body or "") + _PATCH_MOVE.findall(body or "")
+    out, seen = [], set()
+    for p in paths:
+        p = p.strip().strip("'\"")
+        if p and p not in seen:
+            seen.add(p)
+            out.append(p)
+    return out, bool(out)
+
+
+# --------------------------------------------------------------- antigravity: toolCall
+#
+# The three obvious write tools, by name. This is NOT the matcher -- the matcher is `*`, for
+# the reason in targets/antigravity.py -- it is only the set whose argument shape is known.
+# A tool outside it still arrives here and is read generically rather than allowed unseen.
+_AG_FILE_TOOLS = ("write_to_file", "replace_file_content", "multi_replace_file_content")
+_AG_COMMAND_TOOLS = ("run_command",)
+
+# Argument keys that name a file, and keys that name a command line. Several spellings each,
+# because these are the host's names and a rename must degrade to partial coverage rather than
+# to silence.
+_AG_PATH_KEYS = ("TargetFile", "target_file", "TargetFilePath", "AbsolutePath", "file_path",
+                 "FilePath", "notebook_path", "path", "Path")
+_AG_COMMAND_KEYS = ("CommandLine", "command_line", "command", "Command")
+
+
+def _first_str(args: dict, keys) -> str:
+    for k in keys:
+        v = args.get(k)
+        if isinstance(v, str) and v.strip():
+            return v
+    return ""
+
+
+def _all_strs(args: dict, keys) -> list[str]:
+    out = []
+    for k in keys:
+        v = args.get(k)
+        if isinstance(v, str) and v.strip():
+            out.append(v)
+        elif isinstance(v, list):
+            out += [x for x in v if isinstance(x, str) and x.strip()]
+    return out
+
+
+def antigravity_call(event: dict) -> tuple[str, dict]:
+    """(tool name, args) from an Antigravity event, falling back to the Claude shape.
+
+    The fallback is not politeness. probe.py fires `tool_name`/`tool_input` events under EVERY
+    protocol, so an adapter that only understood `toolCall` would extract zero targets from
+    every probe row, allow all of them, and report a table of leaks that named the wrong
+    finding. Reading both shapes is what makes the antigravity rows mean something.
+    """
+    call = event.get("toolCall") or event.get("tool_call")
+    if isinstance(call, dict):
+        name = call.get("name") or call.get("toolName") or ""
+        args = call.get("args") or call.get("arguments") or call.get("input") or {}
+        if isinstance(name, str) and name:
+            return name, (args if isinstance(args, dict) else {})
+    name = event.get("tool_name") or ""
+    args = event.get("tool_input") or {}
+    return (name if isinstance(name, str) else ""), (args if isinstance(args, dict) else {})
+
+
+def antigravity_targets(event: dict) -> tuple[list[str], bool]:
+    """(write targets, fully_covered) for one Antigravity tool call."""
+    name, args = antigravity_call(event)
+    if name in _AG_FILE_TOOLS:
+        return _all_strs(args, _AG_PATH_KEYS), True
+    if name in _AG_COMMAND_TOOLS:
+        return shell_targets(_first_str(args, _AG_COMMAND_KEYS)), False
+    if name in PATH_FIELD_TOOLS or name == "Bash":
+        return targets_from_event(name, args)
+    # An unrecognised tool, which the `*` matcher guarantees will happen: sed_file,
+    # notebook_edit, a delete_file proto field, anything reached through call_mcp_tool. Read
+    # its path-shaped and command-shaped arguments and report PARTIAL coverage. This
+    # over-blocks -- a read tool naming a denied path is refused too -- and that is the only
+    # direction this file may err in.
+    found = _all_strs(args, _AG_PATH_KEYS)
+    for cmd in _all_strs(args, _AG_COMMAND_KEYS):
+        found += shell_targets(cmd)
+    seen, out = set(), []
+    for t in found:
+        if t not in seen:
+            seen.add(t)
+            out.append(t)
+    return out, False
+
+
+# ------------------------------------------------------------------- protocol dispatch
+
+# What a partially-covered parse is called in the block reason, per protocol. Named rather
+# than hardcoded to "Bash", because "[partial-coverage tool: Bash]" printed under an
+# antigravity `sed_file` call is a message that sends the reader to the wrong parser.
+_PARTIAL_NOTE = {
+    "claude": " [partial-coverage tool: Bash]",
+    "cursor": " [partial-coverage tool: Bash]",
+    "codex": " [partial-coverage tool: shell]",
+    "antigravity": " [partial-coverage: arguments read generically, not a known write tool]",
+}
+
+
+def parse_event(protocol: str, event: dict) -> tuple[list[str], bool, str]:
+    """(write targets, fully_covered, deny_reason) for one event under one host's schema.
+
+    A non-empty deny_reason is a decision, not an error: it is how "this is a write I could
+    not read" reaches the caller as a BLOCK. Returning ([], True) for it instead would allow
+    the write and report it as fully covered, which is the worst shape in this codebase.
+    """
     tool_name = event.get("tool_name", "")
     tool_input = event.get("tool_input", {}) or {}
-    cwd = event.get("cwd") or os.getcwd()
+    if not isinstance(tool_input, dict):
+        tool_input = {}
 
+    if protocol == "antigravity":
+        targets, covered = antigravity_targets(event)
+        return targets, covered, ""
+
+    if protocol == "codex":
+        body = patch_body(tool_name, tool_input)
+        if body is not None:
+            paths, parsed = patch_targets(body)
+            if not parsed:
+                return [], False, (
+                    "an apply_patch body that names no `*** Add/Update/Delete File:` header "
+                    "cannot be read, so the write it performs is unknown. Denying: `ask` is "
+                    "not a block on Codex -- an unsupported decision is continued past, so "
+                    "answering `ask` would allow this write while looking like a deferral")
+            # UNION with the ordinary parse, never a replacement. A patch delivered through a
+            # shell heredoc is both an apply_patch AND a command, and reading only the headers
+            # would drop the redirect sitting beside it. Union is the same rule the Bash
+            # parser already follows against its own regexes: nothing that blocked before can
+            # start passing.
+            #
+            # `covered` comes from the ordinary parse and is the right answer for both
+            # shapes: an `apply_patch` tool call is not a shell command, so that arm returns
+            # (no targets, fully covered) and the patch headers stand alone; a heredoc
+            # delivered through Bash returns partial, which the combined row must inherit.
+            more, covered = targets_from_event(tool_name, tool_input)
+            return paths + [m for m in more if m not in paths], covered, ""
+        return targets_from_event(tool_name, tool_input) + ("",)
+
+    # claude, and cursor which reads Claude Code's configuration
+    return targets_from_event(tool_name, tool_input) + ("",)
+
+
+def emit(protocol: str, verdict: int, message: str) -> int:
+    """Say the verdict on the channel this host actually reads, and return the exit code.
+
+    On the stdout hosts the exit code is 0 for BOTH answers, because the host ignores it. That
+    is not a bug being papered over: exiting 2 there would be answering on a channel nobody
+    reads, which is how a deny becomes an allow with a tidy exit code in front of it. An ALLOW
+    is printed too -- an empty stdout is not an allow, it is an adapter that said nothing, and
+    probe.py correctly refuses to read it as one.
+    """
+    if protocol in STDOUT_PROTOCOLS:
+        payload = {"decision": "deny" if verdict == BLOCK else "allow"}
+        if message:
+            payload["reason"] = message
+        sys.stdout.write(json.dumps(payload) + "\n")
+        sys.stdout.flush()
+        return ALLOW
+    if verdict == BLOCK:
+        print(message, file=sys.stderr)
+        return BLOCK
+    if message:
+        print(message, file=sys.stderr)
+    return ALLOW
+
+
+def _fallback(protocol: str, message: str) -> int:
+    """The answer when the guard could not do its job: allow and complain, or deny and say so.
+
+    The split is a fact about the hosts, not a preference. See the module docstring.
+    """
+    if protocol in FAIL_CLOSED_PROTOCOLS:
+        return emit(protocol, BLOCK,
+                    "mir-guard: %s. DENYING: on this host a failed hook is a skipped hook, so "
+                    "allowing here would let the write land with nothing recorded." % message)
+    print("mir-guard: %s, allowing (policy not enforced)" % message, file=sys.stderr)
+    return ALLOW
+
+
+class _ArgError(Exception):
+    """argparse's own failure path exits 2, which is BLOCK. Raise instead, so a bad command
+    line becomes exit 3 -- 'not told which host is asking' -- rather than a block that looks
+    like a working policy."""
+
+
+class _Parser(argparse.ArgumentParser):
+    def error(self, message):
+        raise _ArgError(message)
+
+    def exit(self, status=0, message=None):
+        raise _ArgError(message or "")
+
+
+def parse_protocol(argv=None):
+    """(protocol, error). Exactly one of the two is None.
+
+    `--protocol` is an ordinary argparse flag rather than a hand-rolled scan because
+    probe.guard_requires_protocol looks for the literal string in this file's syntax tree:
+    landing the flag is what arms the wiring check, with nothing hardcoded to a date.
+    """
+    ap = _Parser(prog="mir-guard", add_help=False)
+    ap.add_argument("--protocol", default=None,
+                    help="which host is asking: " + ", ".join(PROTOCOLS))
+    argv = list(sys.argv[1:] if argv is None else argv)
+    try:
+        args, _unknown = ap.parse_known_args(argv)
+    except _ArgError as e:
+        return None, "mir-guard: %s" % e
+    proto = args.protocol
+    if not proto:
+        return None, (
+            "mir-guard: no --protocol given, so this guard does not know which host is asking "
+            "and has enforced NOTHING. There is deliberately no default: running the wrong "
+            "host's parser finds no field it recognises and allows every write while looking "
+            "clean. Re-run `mir init` to migrate the hook registration.")
+    if proto not in PROTOCOLS:
+        return None, ("mir-guard: unknown --protocol %r; this guard answers for %s. Nothing "
+                      "was enforced." % (proto, ", ".join(PROTOCOLS)))
+    return proto, None
+
+
+def _decide_event(protocol: str, event: dict) -> int:
+    cwd = event.get("cwd") or os.getcwd()
     repo_root = find_repo_root(cwd)
     if repo_root is None:
-        print("mir-guard: no .mir/ found above cwd, allowing (policy not loaded)", file=sys.stderr)
-        return ALLOW
+        return _fallback(protocol, "no .mir/ found above cwd")
     try:
         manifest = load_manifest(repo_root)
         policy = manifest["policy"]
     except Exception as e:
-        print(f"mir-guard: could not load policy, allowing ({e})", file=sys.stderr)
-        return ALLOW
+        return _fallback(protocol, "could not load policy (%s)" % e)
 
     version = manifest.get("mir_manifest_version")
     if version != GUARD_MANIFEST_VERSION:
-        # Loud on every invocation, and still allow. This guard is a frozen copy; it does not
-        # know what a newer manifest means, and refusing every write would brick the agent in
-        # a repo whose policy is perfectly valid. `mir verify` is where this fails closed.
-        print(f"mir-guard: manifest version {version!r} != guard version "
-              f"{GUARD_MANIFEST_VERSION}; NOT ENFORCING. Regenerate the guard "
-              f"(`mir init`) -- this write is allowed unchecked.", file=sys.stderr)
-        return ALLOW
+        # Loud on every invocation, and still ALLOW -- on every protocol, antigravity
+        # included. This guard is a frozen copy; it does not know what a newer manifest means,
+        # and refusing every write would brick the agent in a repo whose policy is perfectly
+        # valid. The probe is where this fails closed, and targets/antigravity.py names this
+        # as the one exception to its fail-closed posture rather than leaving it to be found.
+        return emit(protocol, ALLOW,
+                    "mir-guard: manifest version %r != guard version %s; NOT ENFORCING. "
+                    "Regenerate the guard (`mir init`) -- this write is allowed unchecked."
+                    % (version, GUARD_MANIFEST_VERSION))
 
-    targets, covered = targets_from_event(tool_name, tool_input)
+    targets, covered, deny = parse_event(protocol, event)
+    if deny:
+        return emit(protocol, BLOCK, "mir-guard: blocked -- %s" % deny)
     for t in targets:
         verdict, reason = decide(resolve(t, repo_root), canonical(t, repo_root),
                                  policy, repo_root)
         if verdict == BLOCK:
-            note = "" if covered else " [partial-coverage tool: Bash]"
-            print(f"mir-guard: blocked write to {t}{note} -- {reason}", file=sys.stderr)
-            return BLOCK
-    return ALLOW
+            note = "" if covered else _PARTIAL_NOTE.get(protocol, " [partial coverage]")
+            return emit(protocol, BLOCK,
+                        "mir-guard: blocked write to %s%s -- %s" % (t, note, reason))
+    return emit(protocol, ALLOW, "")
+
+
+def main(argv=None) -> int:
+    protocol, err = parse_protocol(argv)
+    if err is not None:
+        # Nothing is printed on stdout here even though a stdout host may be the caller: with
+        # no protocol there is no way to know which host that is, and guessing is the thing
+        # this branch exists to refuse. GOAL.md B1.4 records that exit 3 is fail-open on every
+        # host until the hook registration is migrated.
+        print(err, file=sys.stderr)
+        return PROTOCOL_ERROR
+
+    try:
+        try:
+            event = json.load(sys.stdin)
+        except Exception as e:
+            return _fallback(protocol, "could not parse hook input (%s)" % e)
+        if not isinstance(event, dict):
+            return _fallback(protocol, "hook input is not a JSON object")
+        return _decide_event(protocol, event)
+    except Exception as e:
+        # The fail-closed host's last line of defence. An uncaught exception here would exit
+        # nonzero with nothing on stdout, which Antigravity logs and skips -- the write lands.
+        # So the crash still answers, on the channel the host reads.
+        return _fallback(protocol, "crashed (%s: %s)" % (type(e).__name__, e))
 
 
 if __name__ == "__main__":

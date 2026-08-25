@@ -131,9 +131,13 @@ with tempfile.TemporaryDirectory() as tmp:
     guard_py = os.path.join(repo, ".mir", "guard.py")
 
     def _guard(path):
+        # `--protocol` is REQUIRED: the guard hard-errors (exit 3) without it rather than
+        # defaulting to claude, because defaulting is how a mis-wired Codex hook runs the
+        # Claude parser and allows every write while reporting clean. A caller that omitted
+        # it here would be testing the refusal, not the denial.
         ev = {"tool_name": "Write", "tool_input": {"file_path": path, "content": "x"}, "cwd": repo}
-        p = subprocess.run([sys.executable, guard_py], input=json.dumps(ev),
-                           text=True, capture_output=True)
+        p = subprocess.run([sys.executable, guard_py, "--protocol", "claude"],
+                           input=json.dumps(ev), text=True, capture_output=True)
         return p.returncode, p.stderr
 
     def _denied(path):
@@ -165,13 +169,20 @@ with tempfile.TemporaryDirectory() as tmp:
     check("probe catches a guard that treats a denied pattern as a literal (exit 1)",
           r.returncode == 1, f"rc={r.returncode}")
 
-print("schema stays v1 (a manifest written before globs must not start failing)")
+print("schema v2 (and a v1 manifest that must not start failing)")
 _v1 = {"mir_manifest_version": 1, "kind": "project-policy",
        "policy": {**schema.empty_policy(), "allowed_write_roots": ["."],
                   "denied_paths": [".git", ".env", ".env.local"]}}
 check("a v1 manifest with only literal denied_paths still validates",
       schema.validate_manifest(_v1) == [], str(schema.validate_manifest(_v1)))
-check("MANIFEST_VERSION is unchanged at 1", schema.MANIFEST_VERSION == 1)
+# The version this release deliberately bumps. Pinned rather than derived so the breaking
+# change has to be typed here too: `MANIFEST_VERSION` moving is the release's stated breaking
+# change, and a test that read the constant back at itself could never notice it moved.
+check("MANIFEST_VERSION is 2 -- v2.0.0's stated breaking change",
+      schema.MANIFEST_VERSION == 2)
+check("v1 is still READABLE, because the guard fails open on a version mismatch and the "
+      "reader needs 'stale, regenerate it', not 'malformed'",
+      1 in schema.SUPPORTED_VERSIONS and 2 in schema.SUPPORTED_VERSIONS)
 
 print("generate (thin AGENTS.md, merged settings)")
 with tempfile.TemporaryDirectory() as tmp:

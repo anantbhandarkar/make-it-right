@@ -48,8 +48,15 @@ GOOD_MATCHER = "Write|Edit|MultiEdit|NotebookEdit|Update|Bash"
 # user's migration case -- a correct matcher over a guard that exits 3 on every call.
 V1_COMMAND = 'python3 "$CLAUDE_PROJECT_DIR/.mir/guard.py"'
 
+# The command generate.py registers NOW. The default below moved from V1 to V2 when the guard
+# started requiring --protocol: every fixture that means "a correctly wired harness" has to
+# carry the current command, or it is asserting against the migration case rather than the
+# working one. V1_COMMAND is still spelled out and is still used deliberately, in the Trap 2
+# fixture and in the command_verdict table -- that is the whole point of keeping both names.
+V2_COMMAND = V1_COMMAND + " --protocol claude"
 
-def _settings(matcher, tag="mir-init-guard", cmd=V1_COMMAND):
+
+def _settings(matcher, tag="mir-init-guard", cmd=V2_COMMAND):
     return {"hooks": {"PreToolUse": [{
         "matcher": matcher, "_mir": tag,
         "hooks": [{"type": "command", "command": cmd}],
@@ -98,7 +105,8 @@ def _mk_repo(tmp, roots=("src", "tests"), settings=None, name="repo", denied=Non
 # generated, for the same reason GOOD_MATCHER is: a verdict-channel test that depends on the
 # generator cannot tell "the probe misread the channel" from "the generator is mid-edit".
 AGENTS_HOOKS = {"hooks": {"PreToolUse": [{"_mir": "mir-init-guard", "hooks": [
-    {"type": "command", "command": 'python3 "$PROJECT_DIR/.mir/guard.py"'}]}]}}
+    {"type": "command",
+     "command": 'python3 "$PROJECT_DIR/.mir/guard.py" --protocol antigravity'}]}]}}
 
 # An Antigravity adapter, in the shape the host actually reads: the exit code is ignored, so
 # the verdict is JSON on stdout and the process exits 0 either way. It delegates the policy
@@ -107,10 +115,16 @@ AGENTS_HOOKS = {"hooks": {"PreToolUse": [{"_mir": "mir-init-guard", "hooks": [
 # `{emit}` is the whole point. The mutation strips the stdout write and changes nothing else,
 # which is exactly the adapter bug a probe that only read exit codes would score as a clean
 # allow-path run.
+#
+# The inner call passes `--protocol claude` on purpose: this fixture asks the real guard for
+# the POLICY decision on the exit-code channel and then re-says it on stdout. Asking it for
+# `--protocol antigravity` would make the guard emit the JSON itself, and the fixture would be
+# testing the guard's own adapter rather than the probe's reader.
 _ADAPTER = '''\
 import json, subprocess, sys
 data = sys.stdin.read()
-p = subprocess.run([sys.executable, {guard!r}], input=data, text=True, capture_output=True)
+p = subprocess.run([sys.executable, {guard!r}, "--protocol", "claude"], input=data,
+                   text=True, capture_output=True)
 payload = ({{"decision": "deny", "reason": p.stderr.strip()[:200]}} if p.returncode == 2
            else {{"decision": "allow"}})
 {emit}
@@ -130,9 +144,9 @@ _PROTOCOL_GUARD = '''\
 import argparse, subprocess, sys
 ap = argparse.ArgumentParser()
 ap.add_argument("--protocol", required=True)
-ap.parse_args()
-sys.exit(subprocess.run([sys.executable, {guard!r}], input=sys.stdin.read(),
-                        text=True).returncode)
+a = ap.parse_args()
+sys.exit(subprocess.run([sys.executable, {guard!r}, "--protocol", a.protocol],
+                        input=sys.stdin.read(), text=True).returncode)
 '''
 
 # A guard that enforces exactly as the real one does and differs from it in ONE respect: the
@@ -141,8 +155,8 @@ sys.exit(subprocess.run([sys.executable, {guard!r}], input=sys.stdin.read(),
 # exit 1 with or without a version check.
 _DELEGATE = '''\
 import subprocess, sys
-sys.exit(subprocess.run([sys.executable, {guard!r}], input=sys.stdin.read(),
-                        text=True).returncode)
+sys.exit(subprocess.run([sys.executable, {guard!r}, "--protocol", "claude"],
+                        input=sys.stdin.read(), text=True).returncode)
 '''
 
 
@@ -431,8 +445,8 @@ def run(check):
         gp = os.path.join(ahead, ".mir", "guard.py")
         ev = {"tool_name": "Write", "tool_input": {"file_path": ".git/config", "content": "x"},
               "cwd": ahead}
-        p = subprocess.run([sys.executable, gp], input=json.dumps(ev), text=True,
-                           capture_output=True)
+        p = subprocess.run([sys.executable, gp, "--protocol", "claude"],
+                           input=json.dumps(ev), text=True, capture_output=True)
         check("RUNTIME fails OPEN on a version mismatch: the guard allows a denied write and "
               "says so on stderr, rather than bricking the agent",
               p.returncode == 0 and "NOT ENFORCING" in p.stderr, f"rc={p.returncode}")
@@ -534,11 +548,17 @@ def run(check):
                       files={".agents/hooks.json": AGENTS_HOOKS})
         guard_copy = os.path.join(ag, ".mir", "guard.py")
 
-        # A guard with no stdout verdict at all, judged as antigravity would judge it. This is
-        # the state of the tree BEFORE an antigravity adapter exists, and GUARD-ERROR is the
-        # correct finding: the guard answers on a channel this host does not read.
-        r = _run_probe(ag)
-        rep = _json_probe(ag)
+        # A guard with no stdout verdict at all, judged as antigravity would judge it, and
+        # GUARD-ERROR is the correct finding: it answers on a channel this host does not read.
+        #
+        # It has to be spelled as an explicit exit-code-only delegate now. It used to be the
+        # bare `.mir/guard.py`, which was the same thing only while no antigravity adapter
+        # existed; once the real guard could answer on stdout, that fixture silently became
+        # "the working adapter" and this block would have asserted the opposite of what it
+        # names. The property under test is unchanged: an exit code is not a verdict here.
+        exit_only = _delegate(tmp, guard_copy, "ag-exit-only.py")
+        r = _run_probe(ag, guard=exit_only)
+        rep = _json_probe(ag, guard=exit_only)
         check("an exit-code-only guard facing a declared antigravity target is INCONCLUSIVE "
               "(exit 3), not clean and not a leak",
               r.returncode == probe.EXIT_INCONCLUSIVE, f"rc={r.returncode}")
@@ -688,7 +708,12 @@ def run(check):
           not _ok and "codex" in _why, _why)
 
     with tempfile.TemporaryDirectory() as tmp:
-        stale = _mk_repo(tmp, settings=_settings(GOOD_MATCHER), name="v1-command")
+        # cmd=V1_COMMAND is PINNED here, not inherited: this fixture IS the migration case --
+        # a correct matcher over a command with no --protocol -- and letting it pick up the
+        # current default would turn Trap 2's end-to-end test into a second copy of the
+        # control below it.
+        stale = _mk_repo(tmp, settings=_settings(GOOD_MATCHER, cmd=V1_COMMAND),
+                         name="v1-command")
         pg = _protocol_guard(tmp, os.path.join(stale, ".mir", "guard.py"))
         w = probe.wiring_report(stale, pg)
         check("TRAP 2 end to end: a correct matcher over the v1 command is UNWIRED, not wired",
@@ -713,7 +738,8 @@ def run(check):
     # ------------------------------------------ B1.3: the declared set comes from the manifest
     with tempfile.TemporaryDirectory() as tmp:
         gp = os.path.join(HERE, "guard.py")
-        codex_hooks = {"hooks": {"PreToolUse": [{"command": V1_COMMAND}]}}
+        codex_hooks = {"hooks": {"PreToolUse": [
+            {"command": V1_COMMAND + " --protocol codex"}]}}
 
         missing = _mk_repo(tmp, roots=(".",), settings=_settings(GOOD_MATCHER), name="no-codex",
                            denied=[".git", ".mir"], targets={"codex": {}})
@@ -961,9 +987,14 @@ def run(check):
     _NOWHERE = os.path.join(tempfile.gettempdir(), "mir-probe-nowhere")
     _base = {"allowed_write_roots": ["."], "denied_paths": list(schema.BASELINE_DENIED)}
     _sibs = probe.sibling_controls(_base, _NOWHERE)
+    # Four now, not two: B1.6 added repo-local `.codex` and `.agents` to BASELINE_DENIED, and
+    # a repo-local literal is exactly the shape that earns a derived sibling. Spelled out
+    # rather than derived from BASELINE_DENIED, because deriving it would restate
+    # sibling_controls' own filter and the test would agree with any behaviour it had.
     check("a literal repo-local denied entry yields a derived sibling control",
           {s["path"] for s in _sibs} ==
-          {".git" + probe.SIBLING_SUFFIX, ".mir" + probe.SIBLING_SUFFIX},
+          {".git" + probe.SIBLING_SUFFIX, ".mir" + probe.SIBLING_SUFFIX,
+           ".codex" + probe.SIBLING_SUFFIX, ".agents" + probe.SIBLING_SUFFIX},
           str([s["path"] for s in _sibs]))
     check("every sibling control is a POSITIVE control: an over-block is exit 3, not a "
           "quieter pass",

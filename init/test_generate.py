@@ -275,8 +275,11 @@ def run(check):
     check("a stale matcher behind the tag is rewritten to the desired one",
           len(mine) == 1 and mine[0]["matcher"] == gen.MATCHER, json.dumps(mine))
     check("a stale matcher reports changed=True (silence would mean no new coverage)", changed)
-    check("a stale command behind the tag is rewritten too",
-          mine[0]["hooks"][0]["command"].endswith('.mir/guard.py"'), json.dumps(mine))
+    check("a stale command behind the tag is rewritten too -- including onto the v2 command, "
+          "which is the migration every existing harness needs and the one a tag-as-boolean "
+          "check would have skipped",
+          '.mir/guard.py' in mine[0]["hooks"][0]["command"]
+          and mine[0]["hooks"][0]["command"].endswith("--protocol claude"), json.dumps(mine))
     check("reconciling never disturbs the user's own hook entry",
           any(h.get("command") == "echo user"
               for e in merged["hooks"]["PreToolUse"] for h in e.get("hooks", [])))
@@ -477,7 +480,10 @@ def run(check):
         check("absent settings.local.json: no warnings, no crash",
               gen.local_settings_warnings(repo) == [])
 
-        good_cmd = 'python3 "$CLAUDE_PROJECT_DIR/.mir/guard.py"'
+        # Built from the target's own command builder, never spelled inline. A literal here
+        # went stale the moment `--protocol` landed, and a stale fixture makes this test pass
+        # or fail for a reason of its own making rather than for the property it names.
+        good_cmd = gen.claude_guard_command(".mir/guard.py")
         _write(os.path.join(repo, ".claude", "settings.local.json"), json.dumps({
             "hooks": {"PreToolUse": [
                 {"matcher": gen.MATCHER, "_mir": gen.HOOK_TAG,
@@ -530,3 +536,354 @@ def run(check):
               _read(os.path.join(repo, ".claude", "settings.local.json")) == before)
         check("settings.local.json is not among plan()'s write targets",
               gen.LOCAL_SETTINGS_REL not in [it["path"] for it in _plan(repo)])
+
+    _p3b_targets(check)
+    with tempfile.TemporaryDirectory() as tmp:
+        _p3b_generation(check, tmp)
+    with tempfile.TemporaryDirectory() as tmp:
+        _p3b_migration(check, tmp)
+    with tempfile.TemporaryDirectory() as tmp:
+        _p3b_skill_dirs(check, tmp)
+    _p3b_cli(check)
+
+
+# -- P3b: cross-agent init --------------------------------------------------------------
+#
+# The properties below are the ones that decide whether "supports Codex and Antigravity"
+# means anything. Every one of them is a way the feature could ship green and inert:
+#
+#   B1.1  a target that does not STATE its enforcement level inherits silence
+#   B1.2  a file emitted where nothing reads it (defect D6, which cost a release)
+#   B1.6  a self-protection gap opened by the very files this feature adds
+#   B1.7  a coverage table whose "what was NOT proven" cell is empty for an unverified target
+#   B1.8  a generated AGENTS.md that claims enforcement no target provides
+
+def _p3b_targets(check):
+    import targets as tp
+    from targets.base import Capability, Target, check_capabilities
+
+    check("B1.1: every target supplies all four capability keys",
+          all(set(tp.CAPABILITY_KEYS) <= set(t.capabilities) for t in tp.ALL),
+          str({t.name: sorted(t.capabilities) for t in tp.ALL}))
+    check("B1.1: every level is one of the four, and every claim names a mechanism and a "
+          "source -- 'supported' with nothing behind it is the defect this release closes",
+          not [e for t in tp.ALL for e in check_capabilities(t)],
+          str([e for t in tp.ALL for e in check_capabilities(t)]))
+
+    # THE KeyError IS THE TEST. A fifth target must state its enforcement level in its own
+    # file, in front of a reviewer, rather than rendering four blank rows.
+    class _Fifth(Target):
+        name = "fifth"
+        guard_protocol = "fifth"
+        capabilities = {"skills": Capability("none", "m", "s")}
+
+    raised = False
+    try:
+        _Fifth().capability("write_policy_enforcement")
+    except KeyError:
+        raised = True
+    check("B1.1: a target with no write_policy_enforcement raises KeyError -- it does not "
+          "default to a level nobody chose", raised)
+    check("B1.1: and check_capabilities names every key it is missing, so the failure is "
+          "actionable rather than a bare traceback",
+          len(check_capabilities(_Fifth())) == 3,
+          str(check_capabilities(_Fifth())))
+
+    # A PIN, not a mutation, and labelled as one. The behaviour is already asserted above;
+    # what this catches is the edit that would soften it -- `capabilities.get(key)` reads as
+    # a tidy-up, passes every behavioural test that does not ask for a missing key, and hands
+    # the fifth target a level nobody chose.
+    check("B1.1 pin: capability() indexes, it does not .get() -- a default here is exactly "
+          "the silence the KeyError exists to forbid",
+          "self.capabilities[key]" in
+          open(os.path.join(HERE, "targets", "base.py"), encoding="utf-8").read())
+
+    check("B1.2: claude registers .claude/settings.json, codex .codex/hooks.json, "
+          "antigravity .agents/hooks.json",
+          tp.BY_NAME["claude"].wiring_files[0] == os.path.join(".claude", "settings.json")
+          and tp.BY_NAME["codex"].wiring_files == (".codex/hooks.json",)
+          and tp.BY_NAME["antigravity"].wiring_files == (".agents/hooks.json",),
+          str([(t.name, t.wiring_files) for t in tp.ALL]))
+    check("B1.2: cursor registers NOTHING -- an emitted file nothing reads is defect D6",
+          tp.BY_NAME["cursor"].wiring_files == ())
+    check("B1.2: cursor's output names the exact toggle, because 'enable third-party "
+          "configs' is not something a user can find",
+          any("Include third-party Plugins, Skills, and other configs" in n
+              for n in tp.BY_NAME["cursor"].notes(None)))
+    check("cursor speaks CLAUDE's protocol, not its own -- it reads Claude Code's config",
+          tp.BY_NAME["cursor"].guard_protocol == "claude")
+    check("the fail-open posture is DECLARED per target, and antigravity's is the inverted "
+          "one -- inheriting it silently is the whole failure mode",
+          tp.BY_NAME["antigravity"].fail_open is False
+          and tp.BY_NAME["claude"].fail_open is True)
+
+    # The two files that must agree about where a host registers a hook, and about what a
+    # manifest with no targets block means. probe.py is COPIED into projects, so a
+    # disagreement here is a target that verifies clean by being unlooked-at.
+    import guard as guard_mod
+    import probe
+    check("every target is in probe.TARGET_WIRING -- an unknown target is a wiring FAILURE, "
+          "so a target missing from that table can never verify",
+          all(t.name in probe.TARGET_WIRING for t in tp.ALL),
+          str([t.name for t in tp.ALL if t.name not in probe.TARGET_WIRING]))
+    check("and the files agree, both ways",
+          all(tuple(probe.TARGET_WIRING[t.name]) == tuple(t.wiring_files) for t in tp.ALL),
+          str({t.name: (t.wiring_files, probe.TARGET_WIRING[t.name]) for t in tp.ALL}))
+    check("targets.DEFAULT and probe.DEFAULT_TARGET agree: two files disagreeing about the "
+          "implicit target is an old harness verifying nothing while reporting clean",
+          tp.DEFAULT == probe.DEFAULT_TARGET)
+    check("every target's protocol is one the guard answers for -- an unanswerable protocol "
+          "is exit 3 on every call",
+          all(t.guard_protocol in guard_mod.PROTOCOLS for t in tp.ALL))
+    check("guard and probe agree about which host reads stdout",
+          set(guard_mod.STDOUT_PROTOCOLS) ==
+          {p for p, c in probe.PROTOCOL_CHANNEL.items() if c == probe.CHANNEL_STDOUT})
+    from targets import antigravity as ag_mod
+    check("the antigravity matcher is `*`, not an enumerated list: matchers compile anchored "
+          "and the write surface is wider than the three obvious tools -- sed_file, "
+          "notebook_edit and call_mcp_tool all write, so enumerating three names is a hole",
+          ag_mod.MATCHER == "*"
+          and ag_mod.hooks_document()["hooks"]["PreToolUse"][0]["matcher"] == "*")
+    check("and the emitted hooks file carries an ownership marker in its bytes, so a "
+          "hand-written .codex/.agents hooks file is refused rather than clobbered",
+          gen.MARK in json.dumps(ag_mod.hooks_document()))
+
+    check("resolve() takes a comma list and `all`",
+          [t.name for t in tp.resolve("codex,cursor")] == ["codex", "cursor"]
+          and [t.name for t in tp.resolve("all")] == list(tp.NAMES))
+    check("resolve() defaults to claude alone",
+          [t.name for t in tp.resolve("")] == ["claude"])
+    check("resolve() dedupes rather than emitting a target twice",
+          [t.name for t in tp.resolve("codex,codex")] == ["codex"])
+    _refused = False
+    try:
+        tp.resolve("codx")
+    except ValueError:
+        _refused = True
+    check("an unknown --target is REFUSED, never dropped: `--target codx` must not quietly "
+          "produce a claude-only harness the user believes covers Codex", _refused)
+
+
+def _p3b_generation(check, tmp):
+    import agents_export
+    import schema
+    import targets as tp
+
+    check("B1.6: the self-protection gap this feature opens is closed -- .codex, .agents "
+          "and ~/.gemini are denied",
+          {".codex", ".agents", "~/.gemini"} <= set(schema.BASELINE_DENIED),
+          str(schema.BASELINE_DENIED))
+    check("B1.6: .agents is denied WHOLESALE, not just .agents/hooks.json -- denying the one "
+          "file leaves the skills beside it rewritable",
+          ".agents" in schema.BASELINE_DENIED
+          and ".agents/hooks.json" not in schema.BASELINE_DENIED)
+    check("B1.9: MANIFEST_VERSION is 2 and generated manifests carry it",
+          schema.MANIFEST_VERSION == 2)
+
+    repo = _repo(tmp, "all-targets")
+    items = gen.plan(repo, RESOLVED, ANSWERS, STAMP, tp.ALL)
+    paths = [it["path"] for it in items]
+    check("B1.2 end to end: --target all writes all three enforcement files",
+          {".claude/settings.json", ".codex/hooks.json", ".agents/hooks.json"} <= set(paths),
+          str(paths))
+    check("B1.2 end to end: and NO cursor-specific file",
+          not [p for p in paths if "cursor" in p.lower()], str(paths))
+    gen.apply(repo, items)
+
+    manifest = json.load(open(os.path.join(repo, ".mir", "manifest.json"), encoding="utf-8"))
+    check("B1.3: the resolved target list is written into the MANIFEST, so the probe reads "
+          "the declared set from the harness and not from whoever last typed a flag",
+          set(manifest["targets"]) == set(tp.NAMES), str(manifest.get("targets")))
+    check("B1.3: each entry names the protocol its adapter answers on",
+          manifest["targets"]["cursor"]["protocol"] == "claude", str(manifest["targets"]))
+    check("B1.9: the generated manifest carries version 2",
+          manifest["mir_manifest_version"] == 2)
+    check("the generated manifest validates against its own schema",
+          schema.validate_manifest(manifest) == [], str(schema.validate_manifest(manifest)))
+
+    # B1.6's second half: .agents is denied AND mir still writes .agents/hooks.json, because
+    # the generator runs outside the agent's tool loop. If this were impossible the denial
+    # would have had to be narrowed, which is how the hole gets reopened.
+    check("B1.6: mir can still write .agents/hooks.json even though .agents is denied -- the "
+          "generator is not the agent",
+          os.path.isfile(os.path.join(repo, ".agents", "hooks.json")))
+
+    # ---- B1.7: COVERAGE.md
+    cov = open(os.path.join(repo, ".mir", "COVERAGE.md"), encoding="utf-8").read()
+    check("B1.7: COVERAGE.md exists and opens with a VERDICT BLOCK, not a table -- a table "
+          "invites the reader to find their own row and stop",
+          cov.index("ENFORCED   (guard decides") < cov.index("| target | capability"),
+          "verdict block is not before the table")
+    check("B1.7: the verdict block names claude enforced, codex+antigravity unverified, and "
+          "cursor advisory",
+          "ENFORCED   (guard decides, host hook registered): claude" in cov
+          and "UNVERIFIED (hook file emitted, host invocation not proven): antigravity, codex" in cov
+          and "ADVISORY ONLY — the manifest is NOT enforced for: cursor" in cov, cov[:900])
+
+    rows = [ln for ln in cov.splitlines()
+            if ln.startswith("| ") and "write_policy_enforcement" in ln]
+    check("B1.7: there is one write-policy row per target", len(rows) == len(tp.ALL), str(len(rows)))
+    _empty = [r for r in rows if "**unverified**" in r and "| — |" in r]
+    check("B1.7: every UNVERIFIED row carries a non-empty 'what the probe did NOT prove' "
+          "cell -- for an unverified target that cell IS the finding",
+          not _empty, str(_empty))
+    check("B1.7: and every row carries a manual command to confirm it",
+          all("record" in r or "confirm" in r or "restart" in r for r in rows), str(rows))
+
+    check("B1.7: agents_export's LOSSY_FIELDS surfaces in COVERAGE.md -- a loss recorded and "
+          "not rendered is a loss documented to nobody",
+          agents_export.LOSSY_FIELDS["codex"][0]["cost"][:60] in cov)
+    check("B1.7: and the known loss is named: Codex sub-agent TOML has no `tools:`, so the "
+          "reviewers' read-only restriction is a real capability loss",
+          "no `tools:` equivalent" in cov)
+    check("B1.7: there is NO checked-in agents/codex parallel catalog",
+          not os.path.exists(os.path.join(os.path.dirname(HERE), "agents", "codex")))
+    check("B1.7: agents_export derives from the .md frontmatter and finds every reviewer",
+          {a["name"] for a in agents_export.read_agents()} ==
+          {f[:-3] for f in os.listdir(os.path.join(os.path.dirname(HERE), "agents"))
+           if f.endswith(".md")},
+          str([a["name"] for a in agents_export.read_agents()]))
+    check("B1.7: every agent file is parseable, so nothing is silently dropped from the export",
+          agents_export.problems() == [], str(agents_export.problems()))
+    _tools = [a for a in agents_export.read_agents() if a["tools"]]
+    check("B1.7: the loss is DEMONSTRABLE -- the source declares tools, the Codex TOML has "
+          "no tools key, and the conversion says so in the artifact",
+          _tools and "tools" not in agents_export.to_codex_toml(_tools[0]).split("[agents.")[1]
+          and "LOSS" in agents_export.to_codex_toml(_tools[0]))
+    check("B1.7: and nothing is emitted for Codex agents, because no directory for them was "
+          "found -- mir does not invent a path",
+          agents_export.export_items("codex") == [])
+
+    # ---- B1.8: AGENTS.md stops claiming Claude Code unconditionally
+    agents_md = open(os.path.join(repo, "AGENTS.md"), encoding="utf-8").read()
+    check("B1.8: AGENTS.md is under Antigravity's 12,000-char per-rule-file cap -- over it "
+          "the file is TRUNCATED, and a truncated write-policy paragraph documents a rule "
+          "the agent never reads",
+          len(agents_md) < gen.AGENTS_MD_CAP, str(len(agents_md)))
+    check("B1.8: it names the ENFORCING target rather than claiming enforcement flatly",
+          "ENFORCED for claude" in agents_md, agents_md[-700:])
+    check("B1.8: and it says an advisory target is not enforced IN THE SAME BREATH -- an "
+          "agent that stops reading early must not stop after the reassuring half",
+          "NOT ENFORCED for cursor" in agents_md, agents_md[-700:])
+    check("B1.8: the old unconditional claim is gone",
+          "registered in `.claude/settings.json`)" not in agents_md)
+    check("B1.8: AGENTS.md stays THIN -- no hook JSON, no TOML, no per-tool config",
+          "PreToolUse" not in agents_md and "[agents." not in agents_md
+          and '"matcher"' not in agents_md)
+    check("B1.8: and it defers the depth to COVERAGE.md", ".mir/COVERAGE.md" in agents_md)
+
+    # A claude-only harness must not inherit the multi-target wording, or the paragraph is
+    # just as unconditional as the one it replaced, pointed the other way.
+    solo = _repo(tmp, "solo")
+    gen.apply(solo, gen.plan(solo, RESOLVED, ANSWERS, STAMP, [tp.BY_NAME["claude"]]))
+    solo_md = open(os.path.join(solo, "AGENTS.md"), encoding="utf-8").read()
+    check("B1.8 control: a claude-only harness says ENFORCED and names no advisory target",
+          "ENFORCED for claude" in solo_md and "NOT ENFORCED" not in solo_md, solo_md[-500:])
+    check("a claude-only run writes no .codex or .agents file",
+          not os.path.exists(os.path.join(solo, ".codex"))
+          and not os.path.exists(os.path.join(solo, ".agents")))
+    check("a claude-only manifest still declares its target explicitly",
+          json.load(open(os.path.join(solo, ".mir", "manifest.json"),
+                         encoding="utf-8"))["targets"] == {"claude": {
+              "protocol": "claude",
+              "wiring_files": list(tp.BY_NAME["claude"].wiring_files),
+              "write_policy_enforcement": "enforced"}})
+
+    # A cursor-only harness is the sharpest case: it writes NO enforcement file at all, and
+    # the AGENTS.md must not imply otherwise.
+    cur = _repo(tmp, "cursoronly")
+    cur_items = gen.plan(cur, RESOLVED, ANSWERS, STAMP, [tp.BY_NAME["cursor"]])
+    check("a cursor-only run emits no enforcement file whatsoever",
+          not [it for it in cur_items if "hooks.json" in it["path"]
+               or "settings.json" in it["path"]], str([it["path"] for it in cur_items]))
+    gen.apply(cur, cur_items)
+    cur_md = open(os.path.join(cur, "AGENTS.md"), encoding="utf-8").read()
+    check("and its AGENTS.md says so in the first sentence of the write-policy paragraph",
+          "No target here enforces anything" in cur_md, cur_md[-600:])
+
+
+def _p3b_migration(check, tmp):
+    """The v1 -> v2 hook migration, which is EVERY existing user's path through this release.
+
+    A v1 harness carries `python3 "$CLAUDE_PROJECT_DIR/.mir/guard.py"` with no --protocol. The
+    guard now exits 3 on that command -- and only exit 2 blocks, so until the registration is
+    rewritten the harness is fail-open with a matcher that still looks correct. That is Trap
+    2, and this is the test that the rewrite actually happens rather than a second entry being
+    appended beside the dead one.
+
+    The entry here is deliberately UNTAGGED as well as stale, because that is the harder half:
+    the tag is how mir normally re-finds its own entry, and an entry written before the tag
+    existed can only be recognised by the guard it runs.
+    """
+    repo = _repo(tmp, "v1harness")
+    _write(os.path.join(repo, ".claude", "settings.json"), json.dumps({"hooks": {"PreToolUse": [
+        {"matcher": "Bash", "hooks": [{"type": "command", "command": "echo user"}]},
+        {"matcher": "Write|Edit", "hooks": [
+            {"type": "command", "command": 'python3 "$CLAUDE_PROJECT_DIR/.mir/guard.py"'}]},
+    ]}}))
+    gen.apply(repo, _plan(repo))
+    pre = json.loads(_read(os.path.join(repo, ".claude", "settings.json")))["hooks"]["PreToolUse"]
+    mine = [e for e in pre if "guard.py" in json.dumps(e)]
+    check("migration: the untagged v1 entry is REWRITTEN, not joined by a second one -- two "
+          "entries would mean one hook that works and one that exits 3 on every call",
+          len(mine) == 1, json.dumps(pre))
+    check("migration: the rewritten command carries --protocol claude",
+          mine[0]["hooks"][0]["command"].endswith("--protocol claude"), json.dumps(mine))
+    check("migration: and the stale matcher is widened in the same pass",
+          mine[0]["matcher"] == gen.MATCHER, json.dumps(mine))
+    check("migration: the user's own unrelated hook survives untouched",
+          any(h.get("command") == "echo user" for e in pre for h in e.get("hooks", [])),
+          json.dumps(pre))
+
+
+def _p3b_skill_dirs(check, tmp):
+    import targets as tp
+
+    checkout = os.path.join(tmp, "checkout")
+    os.makedirs(os.path.join(checkout, "skills", "mir-backend-go"))
+    os.makedirs(os.path.join(checkout, "skills", "mir-backend-rust"))
+    repo = _repo(tmp, "skills-repo")
+
+    dirs = gen.skill_dirs_for([tp.BY_NAME["claude"], tp.BY_NAME["antigravity"]])
+    check("both hosts with a project skill directory are covered",
+          set(dirs) == {os.path.join(".claude", "skills"), os.path.join(".agents", "skills")},
+          str(dirs))
+    check("a target with no project skill directory contributes none rather than a guessed "
+          "path", gen.skill_dirs_for([tp.BY_NAME["codex"]]) == list(gen.DEFAULT_SKILL_DIRS))
+
+    linked = gen.install_project_skills(repo, ["mir-backend-go"], checkout, dest_dirs=dirs)
+    check("install writes into every target's skill directory",
+          all(os.path.islink(os.path.join(repo, d, "mir-backend-go")) for d in dirs))
+    check("and reports SLUGS, deduplicated: one skill in two hosts is one skill made "
+          "available, not two", linked == ["mir-backend-go"], str(linked))
+
+    # THE POINT of dest_dirs. Prune matters more than install here: without it a repo
+    # accumulates a dead stack's skills in .agents/skills forever, loading gates for a
+    # framework it no longer uses, in a directory nobody thinks to look in.
+    gen.install_project_skills(repo, ["mir-backend-rust"], checkout, dest_dirs=dirs)
+    removed = gen.prune_project_skills(repo, ["mir-backend-rust"], checkout, dest_dirs=dirs)
+    check("prune reaches .agents/skills too", removed == ["mir-backend-go"], str(removed))
+    check("and the dead stack's skill is gone from BOTH directories",
+          not any(os.path.lexists(os.path.join(repo, d, "mir-backend-go")) for d in dirs))
+    check("while the live one survives in both",
+          all(os.path.islink(os.path.join(repo, d, "mir-backend-rust")) for d in dirs))
+
+    # MUTATION: prune only the default directory, which is the shape this had before.
+    gen.install_project_skills(repo, ["mir-backend-go"], checkout, dest_dirs=dirs)
+    gen.prune_project_skills(repo, ["mir-backend-rust"], checkout)
+    check("MUTATION: a prune that ignores dest_dirs leaves the dead skill in .agents/skills, "
+          "which is the accumulation this argument exists to stop",
+          os.path.lexists(os.path.join(repo, ".agents", "skills", "mir-backend-go")))
+
+
+def _p3b_cli(check):
+    import targets as tp
+
+    src = open(os.path.join(HERE, "cli.py"), encoding="utf-8").read()
+    check("the CLI exposes --target", '"--target"' in src)
+    check("and it passes the resolved targets into plan(), so the manifest records them",
+          "gen.plan(repo, res[\"skills\"], answers, stamp, targets)" in src)
+    check("its default is the single implicit target every v1 harness had",
+          tp.DEFAULT == "claude")
+    check("--target all resolves to every known target, in registry order",
+          [t.name for t in tp.resolve("all")] == list(tp.NAMES))

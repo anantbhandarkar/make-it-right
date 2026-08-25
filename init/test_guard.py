@@ -62,21 +62,40 @@ def _mk_repo(tmp, roots, name="repo", version=None, extra_denied=None):
     return repo
 
 
-def _run(repo, tool_name, tool_input):
+def _run(repo, tool_name, tool_input, protocol="claude"):
     """Drive the real guard.main() in-process with the real hook event.
 
     In-process because the tables below fire a few hundred events and a subprocess each
     would turn one suite into a coffee break; main() rather than decide() because the
     wiring between the two is where a fix like this actually gets dropped.
+
+    `argv` is passed EXPLICITLY rather than left to sys.argv. main() now requires
+    --protocol, and an in-process call that inherited the test runner's argv would be a
+    guard told nothing about its host: exit 3 on every row, and a suite that failed for a
+    reason of its own making rather than for the property it names.
     """
     ev = {"tool_name": tool_name, "tool_input": tool_input, "cwd": repo}
-    old_in, old_err = sys.stdin, sys.stderr
-    sys.stdin, sys.stderr = io.StringIO(json.dumps(ev)), io.StringIO()
+    old_in, old_out, old_err = sys.stdin, sys.stdout, sys.stderr
+    sys.stdin, sys.stdout, sys.stderr = (io.StringIO(json.dumps(ev)), io.StringIO(),
+                                         io.StringIO())
     try:
-        rc = guard.main()
+        rc = guard.main(["--protocol", protocol])
         return rc, sys.stderr.getvalue()
     finally:
-        sys.stdin, sys.stderr = old_in, old_err
+        sys.stdin, sys.stdout, sys.stderr = old_in, old_out, old_err
+
+
+def _run_stdout(repo, event, protocol):
+    """(exit code, stdout) for one raw event. The stdout hosts answer on stdout ONLY, so a
+    helper that returned stderr would be reading the channel the host ignores."""
+    old_in, old_out, old_err = sys.stdin, sys.stdout, sys.stderr
+    sys.stdin, sys.stdout, sys.stderr = (io.StringIO(json.dumps(event)), io.StringIO(),
+                                         io.StringIO())
+    try:
+        rc = guard.main(["--protocol", protocol])
+        return rc, sys.stdout.getvalue()
+    finally:
+        sys.stdin, sys.stdout, sys.stderr = old_in, old_out, old_err
 
 
 def _write(repo, path):
@@ -90,8 +109,8 @@ def _bash(repo, cmd):
 def _subproc(guard_path, repo, path):
     """Out-of-process, for the mutant: a modified guard is a different FILE, not a monkeypatch."""
     ev = {"tool_name": "Write", "tool_input": {"file_path": path, "content": "x"}, "cwd": repo}
-    p = subprocess.run([sys.executable, guard_path], input=json.dumps(ev),
-                       text=True, capture_output=True, cwd=repo)
+    p = subprocess.run([sys.executable, guard_path, "--protocol", "claude"],
+                       input=json.dumps(ev), text=True, capture_output=True, cwd=repo)
     return p.returncode, p.stderr
 
 
@@ -568,8 +587,8 @@ def _mutant(tmp, name, old, new, expect_count=1):
 
 def _bash_subproc(guard_path, repo, cmd):
     ev = {"tool_name": "Bash", "tool_input": {"command": cmd}, "cwd": repo}
-    p = subprocess.run([sys.executable, guard_path], input=json.dumps(ev),
-                       text=True, capture_output=True, cwd=repo)
+    p = subprocess.run([sys.executable, guard_path, "--protocol", "claude"],
+                       input=json.dumps(ev), text=True, capture_output=True, cwd=repo)
     return p.returncode, p.stderr
 
 
@@ -706,6 +725,237 @@ def _d3(check, tmp):
           rc == guard.ALLOW and "manifest version" in err, f"rc={rc} err={err.strip()}")
 
 
+# -- B1.4 / B1.5: the protocol dispatch -------------------------------------
+#
+# Three properties, and each one is a way the multi-protocol guard could be green and inert:
+#
+#   P1  a missing or unknown --protocol must be exit 3, never a default to claude. Defaulting
+#       is how a mis-wired Codex hook runs the Claude parser, finds no field it recognises,
+#       extracts zero write targets, and allows every write while reporting clean.
+#   P2  an unparseable Codex apply_patch must DENY. Not allow, and specifically not `ask`:
+#       Codex continues past an unsupported decision, so `ask` is fail-open in a careful
+#       decision's clothes.
+#   P3  Antigravity BLOCK is exit 0 plus deny-JSON on STDOUT, and the adapter is fail-closed
+#       by construction because the host is fail-open. An adapter that exits 2 and prints
+#       nothing has enforced nothing there.
+
+def _proto_subproc(guard_path, repo, event, argv):
+    p = subprocess.run([sys.executable, guard_path] + list(argv), input=json.dumps(event),
+                       text=True, capture_output=True, cwd=repo)
+    return p.returncode, p.stdout, p.stderr
+
+
+def _protocols(check, tmp):
+    repo = _mk_repo(tmp, ["src"], name="protorepo")
+    gp = os.path.join(repo, ".mir", "guard.py")
+    ev = {"tool_name": "Write", "tool_input": {"file_path": ".git/config", "content": "x"},
+          "cwd": repo}
+
+    # ---- P1: no default, ever
+    rc, out, err = _proto_subproc(gp, repo, ev, [])
+    check("P1: a MISSING --protocol is exit 3 -- not 2 (which would look like a working "
+          "policy) and not 0", rc == guard.PROTOCOL_ERROR, f"rc={rc}")
+    check("P1: and it says it enforced nothing, rather than reporting a block it did not make",
+          "enforced NOTHING" in err, err.strip()[-160:])
+    rc, _out, err = _proto_subproc(gp, repo, ev, ["--protocol", "borg"])
+    check("P1: an UNKNOWN --protocol is exit 3 too, and names the protocols it does answer for",
+          rc == guard.PROTOCOL_ERROR and "claude" in err, f"rc={rc} {err.strip()[-120:]}")
+    rc, _out, _err = _proto_subproc(gp, repo, ev, ["--protocol", ""])
+    check("P1: an EMPTY --protocol is exit 3 -- an empty string is not a host",
+          rc == guard.PROTOCOL_ERROR, f"rc={rc}")
+    check("P1: the flag is a real argparse flag, which is what arms probe.guard_requires_"
+          "protocol -- nothing about the wiring check is hardcoded to a date",
+          '"--protocol"' in open(GUARD_SRC, encoding="utf-8").read())
+
+    # THE CONTROL for P1. Without it, "always exit 3" passes every check above.
+    rc, _out, _err = _proto_subproc(gp, repo, ev, ["--protocol", "claude"])
+    check("P1 control: told which host is asking, the same event BLOCKS (exit 2)",
+          rc == guard.BLOCK, f"rc={rc}")
+
+    # MUTATION: give --protocol a default of claude and the hard error disappears. This is
+    # the mutation because a default is the ONLY way this branch gets softened in practice --
+    # it always looks like a convenience.
+    m, applied = _mutant(tmp, "default-proto.py",
+                         'ap.add_argument("--protocol", default=None,',
+                         'ap.add_argument("--protocol", default="claude",')
+    check("P1 mutation: the default-protocol patch applied", applied)
+    rc, _out, _err = _proto_subproc(m, repo, ev, [])
+    check("P1 MUTATION: with a default, a guard told nothing about its host answers anyway "
+          "-- exit 2 here, and on a Codex event it would be exit 0 with zero targets read",
+          rc == guard.BLOCK, f"rc={rc}")
+
+    # ---- P2: codex apply_patch
+    good_patch = ("*** Begin Patch\n*** Update File: .git/config\n@@\n+x\n*** End Patch\n")
+    rc, _o, err = _proto_subproc(gp, repo, {"tool_name": "apply_patch",
+                                            "tool_input": {"patch": good_patch}, "cwd": repo},
+                                 ["--protocol", "codex"])
+    check("P2: a parseable apply_patch is read for its own file headers and BLOCKS a denied "
+          "target", rc == guard.BLOCK and ".git/config" in err, f"rc={rc} {err.strip()[-140:]}")
+    ok_patch = ("*** Begin Patch\n*** Add File: src/new.ts\n+x\n*** End Patch\n")
+    rc, _o, _e = _proto_subproc(gp, repo, {"tool_name": "apply_patch",
+                                           "tool_input": {"patch": ok_patch}, "cwd": repo},
+                                ["--protocol", "codex"])
+    check("P2 control: a patch that writes inside an allowed root is ALLOWED, so the deny "
+          "above is the policy and not a refusal to read patches at all",
+          rc == guard.ALLOW, f"rc={rc}")
+    rc, out, err = _proto_subproc(gp, repo, {"tool_name": "apply_patch",
+                                             "tool_input": {"patch": "*** Begin Patch\ngibberish\n"},
+                                             "cwd": repo}, ["--protocol", "codex"])
+    check("P2: an UNPARSEABLE apply_patch body is DENIED (exit 2), never allowed",
+          rc == guard.BLOCK, f"rc={rc} {err.strip()[-140:]}")
+    check("P2: and it is not `ask` on any channel -- Codex continues past an unsupported "
+          "decision, so `ask` would be this write landing unread",
+          "ask" not in out.lower().replace("asked", ""), out.strip()[:160])
+    check("P2: the reason says why `ask` was not used, so the next reader does not 'soften' "
+          "it back", "continued past" in err or "not a block on Codex" in err,
+          err.strip()[-200:])
+    rc, _o, _e = _proto_subproc(gp, repo, {"tool_name": "apply_patch", "tool_input": {},
+                                           "cwd": repo}, ["--protocol", "codex"])
+    check("P2: an apply_patch call with NO body at all is denied too -- a missing body is a "
+          "write this guard could not read, not an empty one", rc == guard.BLOCK, f"rc={rc}")
+    rc, _o, _e = _proto_subproc(gp, repo, {"tool_name": "Write",
+                                           "tool_input": {"file_path": "src/a.ts"},
+                                           "cwd": repo}, ["--protocol", "codex"])
+    check("P2 control: an ordinary Write under codex is NOT treated as an unreadable patch",
+          rc == guard.ALLOW, f"rc={rc}")
+    for _verb, _patch in (
+            ("Delete File", "*** Begin Patch\n*** Delete File: .git/config\n*** End Patch\n"),
+            ("Move to", "*** Begin Patch\n*** Update File: src/a.ts\n"
+                        "*** Move to: .env\n*** End Patch\n")):
+        rc, _o, _e = _proto_subproc(gp, repo, {"tool_name": "apply_patch",
+                                               "tool_input": {"patch": _patch}, "cwd": repo},
+                                    ["--protocol", "codex"])
+        check(f"P2: `*** {_verb}:` is a write target too -- a rename lands bytes at a path "
+              "the first header never named", rc == guard.BLOCK, f"rc={rc}")
+    # UNION, not replacement. A patch delivered through a shell heredoc is both a patch and a
+    # command; reading only the headers would drop the redirect sitting beside it.
+    _here = ("apply_patch <<EOF > .git/config\n*** Begin Patch\n*** Add File: src/x.ts\n"
+             "+y\n*** End Patch\nEOF")
+    rc, _o, err = _proto_subproc(gp, repo, {"tool_name": "Bash",
+                                            "tool_input": {"command": _here}, "cwd": repo},
+                                 ["--protocol", "codex"])
+    check("P2: a heredoc patch whose OWN headers are innocent is still blocked for the "
+          "redirect beside it -- the patch parse is unioned with the shell parse, never "
+          "substituted for it", rc == guard.BLOCK and ".git/config" in err,
+          f"rc={rc} {err.strip()[-140:]}")
+
+    # MUTATION: answer `ask` instead of denying. The guard still 'decides', the report still
+    # looks careful, and the write lands.
+    m, applied = _mutant(tmp, "ask-patch.py",
+                         'return [], False, (\n                    "an apply_patch body',
+                         'return [], True, ""  # MUTATION\n            if False: return [], False, (\n                    "an apply_patch body')
+    check("P2 mutation: the ask-instead-of-deny patch applied", applied)
+    rc, _o, _e = _proto_subproc(m, repo, {"tool_name": "apply_patch",
+                                          "tool_input": {"patch": "*** Begin Patch\ngibberish\n"},
+                                          "cwd": repo}, ["--protocol", "codex"])
+    check("P2 MUTATION: a guard that does not deny an unreadable patch ALLOWS it (exit 0) -- "
+          "the write lands unread and the run reports clean", rc == guard.ALLOW, f"rc={rc}")
+
+    # ---- P3: antigravity answers on stdout, and fails closed
+    ag_deny = {"toolCall": {"name": "write_to_file",
+                            "args": {"TargetFile": ".git/config", "CodeContent": "x"}},
+               "cwd": repo}
+    rc, out, _e = _proto_subproc(gp, repo, ag_deny, ["--protocol", "antigravity"])
+    check("P3: an Antigravity deny is EXIT 0 -- the host ignores the exit code, so exiting 2 "
+          "would be answering on a channel nobody reads", rc == guard.ALLOW, f"rc={rc}")
+    check("P3: and the verdict is deny-JSON on stdout",
+          json.loads(out or "{}").get("decision") == "deny", out.strip()[:200])
+    ag_ok = {"toolCall": {"name": "write_to_file", "args": {"TargetFile": "src/a.ts"}},
+             "cwd": repo}
+    rc, out, _e = _proto_subproc(gp, repo, ag_ok, ["--protocol", "antigravity"])
+    check("P3: an allow is PRINTED too -- an empty stdout is not an allow, it is an adapter "
+          "that said nothing, and the probe correctly refuses to read it as one",
+          rc == guard.ALLOW and json.loads(out or "{}").get("decision") == "allow",
+          out.strip()[:200])
+    ag_cmd = {"toolCall": {"name": "run_command",
+                           "args": {"CommandLine": "echo x > .git/config"}}, "cwd": repo}
+    rc, out, _e = _proto_subproc(gp, repo, ag_cmd, ["--protocol", "antigravity"])
+    check("P3: run_command routes through the same shell parser as Bash",
+          json.loads(out or "{}").get("decision") == "deny", out.strip()[:200])
+    # The `*` matcher's whole reason: the write surface is wider than three tool names.
+    ag_odd = {"toolCall": {"name": "sed_file", "args": {"TargetFile": ".git/config"}},
+              "cwd": repo}
+    rc, out, _e = _proto_subproc(gp, repo, ag_odd, ["--protocol", "antigravity"])
+    check("P3: a tool OUTSIDE the three known write tools still has its path arguments read "
+          "-- the matcher is `*` because sed_file, notebook_edit and call_mcp_tool all write",
+          json.loads(out or "{}").get("decision") == "deny", out.strip()[:200])
+
+    # Fail-closed by construction, on a repo whose policy cannot be loaded.
+    broken = _mk_repo(tmp, ["src"], name="brokenpolicy")
+    with open(os.path.join(broken, ".mir", "manifest.json"), "w", encoding="utf-8") as f:
+        f.write("{not json")
+    bgp = os.path.join(broken, ".mir", "guard.py")
+    ev_b = dict(ev, cwd=broken)
+    rc, out, _e = _proto_subproc(bgp, broken, ev_b, ["--protocol", "antigravity"])
+    check("P3: an unloadable policy DENIES on antigravity -- the host logs a hook error and "
+          "continues, so failing open there is a write that lands with nothing recorded",
+          json.loads(out or "{}").get("decision") == "deny", out.strip()[:200])
+    rc, _o, err = _proto_subproc(bgp, broken, ev_b, ["--protocol", "claude"])
+    check("P3 control: the SAME failure fails OPEN on claude, where a hook error is visible "
+          "-- the two postures are a fact about the hosts, not a preference",
+          rc == guard.ALLOW and "allowing" in err, f"rc={rc} {err.strip()[-120:]}")
+
+    # MUTATION: strip the stdout write. The adapter still runs the policy, still exits 0, and
+    # now says nothing -- which is precisely what a probe reading exit codes alone would have
+    # scored as a clean allow-path run.
+    m, applied = _mutant(tmp, "mute-ag.py",
+                         'sys.stdout.write(json.dumps(payload) + "\\n")',
+                         "pass  # MUTATION: the stdout write is gone")
+    check("P3 mutation: the mute-stdout patch applied", applied)
+    rc, out, _e = _proto_subproc(m, repo, ag_deny, ["--protocol", "antigravity"])
+    check("P3 MUTATION: a muted adapter exits 0 with EMPTY stdout -- on this host that is an "
+          "allowed write, and it is why the probe treats empty stdout as GUARD-ERROR",
+          rc == guard.ALLOW and out.strip() == "", f"rc={rc} out={out!r}")
+
+    # MUTATION: make the fail-closed host fail open like the others.
+    m, applied = _mutant(tmp, "failopen-ag.py",
+                         "    if protocol in FAIL_CLOSED_PROTOCOLS:",
+                         "    if False:")
+    check("P3 mutation: the fail-open patch applied", applied)
+    rc, out, _e = _proto_subproc(m, broken, ev_b, ["--protocol", "antigravity"])
+    check("P3 MUTATION: with the fail-closed branch gone, an unloadable policy answers on no "
+          "channel at all and the host proceeds",
+          out.strip() == "", f"rc={rc} out={out!r}")
+
+
+def _protocol_probe(check, tmp):
+    """The same three properties, seen END TO END through a generated harness and its probe.
+
+    Mutating the GENERATED copy rather than the source, because the defect class this repo
+    exists against is a frozen `.mir/guard.py` rotting inside a user's project while the
+    maintainer's tree stays green. And asserting the exit CODE, not just "nonzero": 1 (leak),
+    2 (could not run) and 3 (inconclusive) are three different findings.
+    """
+    import generate as gen
+    import targets as tp
+
+    repo = os.path.join(tmp, "e2e")
+    os.makedirs(repo)
+    gen.apply(repo, gen.plan(repo, ["mir-devsecops"], {}, "2026-01-01T00:00:00Z",
+                             [tp.BY_NAME["antigravity"]]))
+    probe_py = os.path.join(repo, ".mir", "probe.py")
+    guard_copy = os.path.join(repo, ".mir", "guard.py")
+
+    def _probe(guard=None):
+        cmd = [sys.executable, probe_py, "--repo", repo]
+        if guard:
+            cmd += ["--guard", guard]
+        return subprocess.run(cmd, capture_output=True, text=True).returncode
+
+    check("an antigravity-only harness verifies CLEAN end to end (the control)",
+          _probe() == 0, str(_probe()))
+
+    src = open(guard_copy, encoding="utf-8").read()
+    mute = os.path.join(tmp, "e2e-mute.py")
+    mutated = src.replace('sys.stdout.write(json.dumps(payload) + "\\n")',
+                          "pass  # MUTATION")
+    open(mute, "w", encoding="utf-8").write(mutated)
+    check("MUTATION applied to the GENERATED guard, not the source", mutated != src)
+    check("MUTATION: a generated antigravity guard that stops writing to stdout is "
+          "INCONCLUSIVE (exit 3) -- not clean, and not a leak the run never found",
+          _probe(mute) == 3, str(_probe(mute)))
+
+
 # -- entry point ------------------------------------------------------------
 
 def run(check):
@@ -723,3 +973,7 @@ def run(check):
     with tempfile.TemporaryDirectory() as tmp:
         _d3(check, tmp)
         _u1(check, tmp)
+    with tempfile.TemporaryDirectory() as tmp:
+        _protocols(check, tmp)
+    with tempfile.TemporaryDirectory() as tmp:
+        _protocol_probe(check, tmp)
