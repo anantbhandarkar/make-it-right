@@ -70,12 +70,25 @@ python3 init/cli.py detect .          # just show what the repo looks like
 `mir init` writes files that shape what a coding agent is *allowed to do*, so its own output is a
 trust boundary. The concrete risks and how this skill handles them:
 
-- **The policy must protect itself.** `.mir/` and `.claude/` are in the baseline `denied_paths`, so
-  the guard blocks an agent from rewriting the manifest or the guard to widen its own permissions.
-  The probe asserts this (`.mir/manifest.json` → BLOCK).
+- **The policy must protect itself.** `.mir/` and `.claude/settings.json` are in the baseline
+  `denied_paths`, so the guard blocks an agent from rewriting the manifest or the guard to widen
+  its own permissions. The probe asserts this (`.mir/manifest.json` → BLOCK). Note the scope
+  precisely: the denied entry is the settings *file*, not the whole `.claude/` directory — the
+  directory has to stay writable because `mir init --install` links project skills into
+  `.claude/skills/`. So `.claude/settings.local.json`, which the host also reads, is **not**
+  covered. Do not read this bullet as full self-protection of the hook configuration.
 - **Deny-by-default outside the allowed roots**, and denied paths win even inside an allowed root,
-  so `src/.env` is blocked though `src` is writable. Secrets (`.env*`), SSH/cloud/kube credentials,
-  `.git`, and the tools' own config (`~/.claude`, `~/.codex`) are denied by default.
+  so `src/.env` is blocked though `src` is writable. SSH/cloud/kube credentials, `.git`, and the
+  tools' own config (`~/.claude`, `~/.codex`) are denied by default.
+- **Secrets are denied by pattern, not by prefix.** A `denied_paths` entry is a path prefix unless
+  it holds a glob metacharacter, and the baseline ships `**/.env*` because a prefix cannot say "at
+  any depth" — `.env` as a prefix denies the repo-root `.env` and leaves `src/.env` writable, which
+  is exactly what v1.0.0 shipped while this section claimed otherwise. The pattern covers `.env`,
+  `.env.<anything>`, `.envrc` (direnv exports live credentials from it), and `.env.example` (a
+  template filled in place is the commonest way a real key lands in a repo) at every depth. A name
+  without the leading dot is untouched, so `environment.ts` and `env.ts` stay writable. The probe
+  fires each pattern at several depths and suffixes, so a prefix-only regression fails the gate
+  instead of reporting green.
 - **No secret leakage into generated context.** The thin AGENTS.md records the *stack*, never file
   contents, tokens, or environment values. Do not add secrets to AGENTS.md or the manifest.
 - **Honest coverage.** The guard fully covers Write/Edit/MultiEdit/NotebookEdit; Bash write

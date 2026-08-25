@@ -19,6 +19,14 @@ The guard enforces the merged effect: a write is allowed only if it is under an
 allowed_write_root AND not under any denied_path. denied_paths win over allowed roots, so
 `src/.env` is blocked even though `src` is allowed.
 
+A denied_paths entry is a path PREFIX unless it contains a glob metacharacter (`*`, `?`,
+`[`), in which case the guard matches it with fnmatch. Both forms live in the one list
+because a prefix cannot express "at any depth" and a secrets file has no fixed depth --
+`.env` as a prefix denies exactly the repo-root `.env` and leaves `src/.env` writable, which
+is how a false security claim shipped in v1.0.0. Literal entries keep their old meaning
+exactly, so a manifest written before globs existed still validates and still denies the
+same set; MANIFEST_VERSION therefore stays 1.
+
 No third-party dependencies. Standard library only, to match validate.py and install.sh.
 """
 
@@ -28,14 +36,23 @@ MANIFEST_VERSION = 1
 
 # Paths that are never a legitimate write target for a coding agent, added to every
 # project policy unless the caller opts out. Repo-relative entries resolve against the
-# repo root; ~ and absolute entries resolve as written.
+# repo root; ~ and absolute entries resolve as written. An entry holding a glob
+# metacharacter is matched with fnmatch instead of as a prefix (see the module docstring).
 BASELINE_DENIED = [
     ".git",                  # rewriting history / hooks is not a normal edit
     ".mir",                  # the policy, guard, and probe live here; must be self-protected
     ".claude/settings.json", # the hook registration; an agent must not unregister the guard
-    ".env",
-    ".env.local",
-    ".env.production",
+    # Every dotfile whose name starts with `.env`, at any depth: `.env`, `.env.local`,
+    # `.env.production`, `src/.env`, `a/b/.env.development`. A secrets file has no fixed
+    # location, so the literal prefixes this replaces only ever covered the repo root.
+    # Deliberately included, and both are calls rather than accidents:
+    #   `.envrc`      -- direnv exports real credentials from it, so it is a secrets file.
+    #   `.env.example`-- a template filled in place is the commonest way a live secret
+    #                    lands in a repo; a blocked write here is a human's one-line fix,
+    #                    a leaked key is not.
+    # Deliberately NOT matched: no leading dot means no match, so `environment.ts`,
+    # `env.ts`, and `src/env.d.ts` stay writable.
+    "**/.env*",
     "~/.ssh",
     "~/.aws",
     "~/.config/gcloud",

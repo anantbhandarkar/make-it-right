@@ -111,6 +111,57 @@ with tempfile.TemporaryDirectory() as tmp:
     check("missing guard is a hard error (exit 2), not a pass",
           r.returncode == 2, f"got {r.returncode}")
 
+print("secrets denial (the .env family, at any depth, inside an allowed root)")
+with tempfile.TemporaryDirectory() as tmp:
+    # allowed_write_roots=["."] on purpose: it is what mir init generates, and it is the only
+    # setup where a BLOCK proves the DENY rule fired. Under ["src"] a root-level `.env.x`
+    # would block as deny-by-default and the test would pass while the denial stayed broken.
+    repo = _mk_repo(["."], tmp)
+    guard_py = os.path.join(repo, ".mir", "guard.py")
+
+    def _guard(path):
+        ev = {"tool_name": "Write", "tool_input": {"file_path": path, "content": "x"}, "cwd": repo}
+        p = subprocess.run([sys.executable, guard_py], input=json.dumps(ev),
+                           text=True, capture_output=True)
+        return p.returncode, p.stderr
+
+    def _denied(path):
+        """Blocked AND blocked for the right reason -- 'outside every allowed root' would be
+        the wrong one here, and would hide a denial that never fired."""
+        rc, err = _guard(path)
+        return rc == 2 and "denied" in err, f"rc={rc} err={err.strip()[-120:]}"
+
+    for _p in ("src/.env", ".env.development", "a/b/.env.local", ".env"):
+        ok, detail = _denied(_p)
+        check(f"{_p} is denied inside the allowed root", ok, detail)
+    check(".env.local and .env.production still denied (no regression on the old literals)",
+          all(_denied(p)[0] for p in (".env.local", ".env.production")))
+    check(".envrc is denied (direnv exports real credentials from it)", _denied(".envrc")[0])
+    check("src/app.ts is allowed (positive control)", _guard("src/app.ts")[0] == 0,
+          _guard("src/app.ts")[1])
+    check("a name merely containing 'env' is not over-blocked",
+          all(_guard(p)[0] == 0 for p in ("src/environment.ts", "src/env.ts", "env/config.ts")),
+          "environment.ts / env.ts / env/ must stay writable")
+
+    # the probe must now FAIL a guard that only honours the literal prefix -- the whole point
+    # of extending it is that this class of defect cannot ship green again
+    prefix_only = os.path.join(tmp, "prefix-only-guard.py")
+    src = open(guard_py, encoding="utf-8").read().replace(
+        "def is_glob(entry: str) -> bool:\n    return any(c in entry for c in _GLOB_META)",
+        "def is_glob(entry: str) -> bool:\n    return False")
+    open(prefix_only, "w").write(src)
+    r = _probe(repo, guard=prefix_only)
+    check("probe catches a guard that treats a denied pattern as a literal (exit 1)",
+          r.returncode == 1, f"rc={r.returncode}")
+
+print("schema stays v1 (a manifest written before globs must not start failing)")
+_v1 = {"mir_manifest_version": 1, "kind": "project-policy",
+       "policy": {**schema.empty_policy(), "allowed_write_roots": ["."],
+                  "denied_paths": [".git", ".env", ".env.local"]}}
+check("a v1 manifest with only literal denied_paths still validates",
+      schema.validate_manifest(_v1) == [], str(schema.validate_manifest(_v1)))
+check("MANIFEST_VERSION is unchanged at 1", schema.MANIFEST_VERSION == 1)
+
 print("generate (thin AGENTS.md, merged settings)")
 with tempfile.TemporaryDirectory() as tmp:
     repo = os.path.join(tmp, "proj")

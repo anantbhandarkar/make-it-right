@@ -11,6 +11,12 @@ Decision, matching schema.py's model:
   - else allow if the target is under an allowed_write_root
   - else block (deny-by-default outside the allowed roots)
 
+A denied_paths entry is a path prefix, unless it contains a glob metacharacter (`*`, `?`,
+`[`), in which case it is matched with fnmatch. Both live in the one list because a prefix
+cannot say "at any depth", and that is the only shape a secrets rule has: `.env` as a prefix
+denies the repo-root `.env` and nothing else, leaving `src/.env` writable. Literal entries
+are still compared exactly as before, so an older manifest denies exactly what it used to.
+
 Blocking is exit code 2 with a reason on stderr, which is the documented Claude Code way to
 stop a tool call and feed the reason back to the model.
 
@@ -29,6 +35,7 @@ one that is honest about not being loaded. Fail-closed is a deliberate later opt
 
 from __future__ import annotations
 
+import fnmatch
 import json
 import os
 import re
@@ -90,9 +97,60 @@ def _is_under(path: str, root: str) -> bool:
     return path.startswith(root + os.sep)
 
 
+# The characters that turn a denied_paths entry from a prefix into a pattern. `[` counts
+# because fnmatch reads it as a character class, so an entry holding one is already a
+# pattern whether or not the author meant it that way.
+_GLOB_META = "*?["
+
+
+def is_glob(entry: str) -> bool:
+    return any(c in entry for c in _GLOB_META)
+
+
+def glob_patterns(entry: str, repo_root: str) -> list[str]:
+    """Absolute fnmatch patterns for one glob entry.
+
+    `**/` is emitted both as written and elided, because it has to mean "at any depth
+    INCLUDING none" and plain fnmatch requires the literal `/` to be present -- without the
+    elided form `**/.env*` would catch `src/.env` but miss the repo-root `.env`.
+    """
+    pat = os.path.expanduser(entry)
+    if not os.path.isabs(pat):
+        pat = os.path.join(repo_root, pat)
+    pats = [pat]
+    if "**/" in pat:
+        pats.append(pat.replace("**/", ""))
+    return pats
+
+
+def matches_glob(target_abs: str, pats: list[str]) -> bool:
+    """True if the target or any ancestor directory matches one of the patterns.
+
+    Ancestors are walked so a matched directory denies everything beneath it, which is the
+    same containment a prefix entry gets from _is_under; without it a pattern would block
+    `secrets.d` but not `secrets.d/key`.
+    """
+    cur = os.path.normpath(target_abs)
+    while True:
+        for p in pats:
+            if fnmatch.fnmatch(cur, p):
+                return True
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            return False
+        cur = parent
+
+
 def decide(target_abs: str, policy: dict, repo_root: str) -> tuple[int, str]:
-    denied = [resolve(p, repo_root) for p in policy.get("denied_paths", [])]
-    for d in denied:
+    for entry in policy.get("denied_paths", []):
+        # A pattern entry is matched, a literal entry is still compared as a prefix. Keeping
+        # the literal branch byte-identical is what lets an older manifest deny exactly the
+        # set it denied before this split existed.
+        if is_glob(entry):
+            if matches_glob(target_abs, glob_patterns(entry, repo_root)):
+                return BLOCK, f"{target_abs} matches a denied pattern ({entry})"
+            continue
+        d = resolve(entry, repo_root)
         if _is_under(target_abs, d):
             return BLOCK, f"{target_abs} is under a denied path ({d})"
 

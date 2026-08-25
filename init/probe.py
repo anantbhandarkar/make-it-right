@@ -8,6 +8,10 @@ policy. This probe instead reads the manifest and attacks the guard with:
 
   - every denied_path              -> expected BLOCK
   - a path just inside each         -> expected BLOCK   (e.g. .git/hooks/x under .git)
+  - for a denied PATTERN, concrete instantiations of it at several depths and with several
+    suffixes -> expected BLOCK. Replaying only the literal entry is what let `.env` pass
+    while `src/.env` and `.env.development` sailed through: the probe ran green because it
+    never asked the question. A pattern is only as good as the variants fired at it.
   - one path under each allowed root that is not denied -> expected ALLOW  (positive control)
   - a path clearly outside every allowed root           -> expected BLOCK  (deny-by-default)
   - the manifest and guard themselves                   -> expected BLOCK  (self-protection)
@@ -83,15 +87,63 @@ def _escape_path(repo_root: str) -> str:
     return os.path.join(os.path.dirname(os.path.abspath(repo_root)), "__mir_escape_probe__", "x")
 
 
+# How a denied pattern is instantiated into concrete attack paths. Depth and suffix are
+# varied together because those are the two axes a prefix-matching guard silently loses:
+# `.env` denied at the root says nothing about `src/.env` or `.env.development`.
+_ATTACK_DEPTHS = ("", "src/", "a/b/")
+_ATTACK_SUFFIXES = ("", ".local", ".development")
+
+_GLOB_META = "*?["
+
+
+def is_glob(entry: str) -> bool:
+    return any(c in entry for c in _GLOB_META)
+
+
+def expand_glob_attacks(entry: str) -> list[str]:
+    """Concrete paths a denied pattern must block: the same pattern at several depths and
+    with several suffixes.
+
+    Only `**/`-prefixed and `*`-suffixed forms are instantiated; anything still holding a
+    metacharacter is dropped rather than fired as a literal, because a Write to a path
+    containing `*` is not an attack any agent would make and a pass there proves nothing.
+    """
+    stem = entry[3:] if entry.startswith("**/") else entry
+    depths = _ATTACK_DEPTHS if entry.startswith("**/") else ("",)
+    out = []
+    for d in depths:
+        if stem.endswith("*"):
+            for suf in _ATTACK_SUFFIXES:
+                out.append(d + stem[:-1] + suf)
+        else:
+            out.append(d + stem)
+    seen, uniq = set(), []
+    for p in out:
+        if not is_glob(p) and p not in seen:
+            seen.add(p)
+            uniq.append(p)
+    return uniq
+
+
+def denied_attack_paths(entry: str) -> list[str]:
+    """The concrete paths to fire at one denied_paths entry.
+
+    A pattern that cannot be instantiated falls back to the literal entry, so an exotic
+    pattern is still attacked (weakly) rather than silently dropped from the report.
+    """
+    if not is_glob(entry):
+        return [entry, os.path.join(entry, "child-file")]  # e.g. .git and .git/hooks/pre-commit
+    return expand_glob_attacks(entry) or [entry]
+
+
 def build_attacks(manifest: dict, repo_root: str) -> list[dict]:
     policy = manifest["policy"]
     attacks: list[dict] = []
 
     for d in policy.get("denied_paths", []):
-        attacks.append({"path": d, "expect": BLOCK, "why": f"denied_path {d}", "kind": "write"})
-        # a child of the denied dir, e.g. .git/hooks/pre-commit
-        attacks.append({"path": os.path.join(d, "child-file"), "expect": BLOCK,
-                        "why": f"inside denied_path {d}", "kind": "write"})
+        for p in denied_attack_paths(d):
+            attacks.append({"path": p, "expect": BLOCK,
+                            "why": f"denied_path {d}", "kind": "write"})
 
     for r in policy.get("allowed_write_roots", []):
         # a normal file under an allowed root that is not itself denied -> must pass
@@ -106,11 +158,21 @@ def build_attacks(manifest: dict, repo_root: str) -> list[dict]:
     attacks.append({"path": ".mir/manifest.json", "expect": BLOCK,
                     "why": "the policy must protect itself", "kind": "write"})
 
-    # one Bash redirect into a denied path, to exercise the partial-coverage path
+    # Bash redirects into denied targets, to exercise the partial-coverage path. Two of them:
+    # the first denied entry, and a NESTED instantiation of the first denied pattern -- the
+    # shell is the likeliest way `echo KEY=... > src/.env` actually gets attempted.
     denied = policy.get("denied_paths", [])
     if denied:
-        attacks.append({"path": os.path.join(denied[0], "via-shell"), "expect": BLOCK,
+        shell_targets = denied_attack_paths(denied[0])
+        attacks.append({"path": shell_targets[-1], "expect": BLOCK,
                         "why": f"shell redirect into denied {denied[0]}", "kind": "bash"})
+    for d in denied:
+        if is_glob(d):
+            nested = [p for p in expand_glob_attacks(d) if "/" in p]
+            if nested:
+                attacks.append({"path": nested[-1], "expect": BLOCK,
+                                "why": f"shell redirect into nested {d}", "kind": "bash"})
+            break
 
     return attacks
 
@@ -154,11 +216,15 @@ def render(report: dict) -> str:
     passed = sum(1 for r in report["results"] if r["ok"])
     lines.append(f"{passed}/{len(report['results'])} attacks behaved as the policy requires")
     lines.append("")
-    lines.append("| target | expected | got | ok |")
-    lines.append("|---|---|---|---|")
+    # The tool column is not decoration: a Write and a Bash attack on the same path are
+    # different claims (Bash coverage is partial), and without it the two rows read as a
+    # duplicate.
+    lines.append("| target | via | expected | got | ok |")
+    lines.append("|---|---|---|---|---|")
     for r in report["results"]:
         mark = "yes" if r["ok"] else "**NO**"
-        lines.append(f"| `{r['path']}` | {r['expect_label']} | {r['got']} | {mark} |")
+        via = "Bash" if r["kind"] == "bash" else "Write"
+        lines.append(f"| `{r['path']}` | {via} | {r['expect_label']} | {r['got']} | {mark} |")
     lines.append("")
     if report["leaks"]:
         lines.append("## LEAKS -- a denied path was not blocked (shipping blocker)")
