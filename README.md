@@ -1,60 +1,91 @@
 # Make It Right
 
-> **AI makes it work. Make It Right.**
->
-> Reliability skills and a per-repository write-policy harness for AI coding agents.
+<div align="center">
 
-Make It Right helps an agent discover constraints before it writes code. It installs task-specific skills globally, routes each task from broad discipline to stack-specific guidance, and can create a verified write boundary for one repository.
+**A practical safety layer for AI coding agents.**
 
-Supports Claude Code, Cursor, Codex CLI, and Antigravity. Start with the [quickstart](#installation), then see the [full skill tree](docs/skill-tree.md).
+[What it does](#what-it-does) · [How it works](#how-it-works) · [Quick start](#quick-start) · [Project setup](#protect-one-project)
 
-## At a glance
+</div>
 
-| If you need to… | Make It Right gives you… |
+| License | Install | Agent hosts |
+|---|---|---|
+| MIT | Bash installer; Python 3 for checks | Claude Code · Codex CLI · Antigravity · Cursor* |
+
+\* The installer can prepare each host, but write protection depends on the host. See [support](#supported-hosts).
+
+Make It Right helps an AI coding agent pause before a risky change. It asks for missing context, confirms the plan, loads guidance for the stack, and can prevent writes outside approved project paths.
+
+It is a small library of reusable skills, reviewer checklists, and a per-project setup command called `mir init`.
+
+## Contents
+
+| Start here | Use it | Reference |
+|---|---|---|
+| [What it does](#what-it-does) | [Quick start](#quick-start) | [What it covers](#what-it-covers) |
+| [What problem it solves](#what-problem-it-solves) | [Project setup](#protect-one-project) | [How guidance is chosen](#how-guidance-is-chosen) |
+| [How it works](#how-it-works) | [Validate](#validate) | [Limits](#limits) |
+| [Supported hosts](#supported-hosts) | [Learn more](#learn-more) | [License](#license) |
+
+## What it does
+
+| Part | In simple terms |
 |---|---|
-| Avoid happy-path code that violates unstated constraints | Risk triage, constraint questions, an assumption ledger, invariants, failure modes, and an approved design before implementation |
-| Give an agent the right context | Automatic `TRIGGER`/`SKIP` routing through a pillar → tier → module chain |
-| Make state-changing work safer | Guidance for retries, concurrency, external calls, migrations, authorization, PII, and delivery controls |
-| Limit where an agent can write | A per-repository manifest, guard, hook wiring, and probe from `mir init` |
+| Conversation before coding | Asks the few questions that can change the solution, then confirms what everyone is assuming. |
+| Guidance for the right stack | Picks the broad engineering area, runtime, and framework guidance that match the task. |
+| Optional project write guard | Stops an agent from writing to protected paths or outside the project paths you approve. |
+| Checks for the repository | Verifies the skill tree, generated diagrams, setup files, and write guard. |
 
-## The problem → the control
+You can use the skills without the project guard. You can also add the guard only to projects that need it.
 
-AI coding agents are good at producing locally plausible code. They are less reliable when the important rule is implicit: a retry can double-charge, a race can oversell the last item, a migration can lock a populated table, or a token can identify a user without authorizing that row.
+## What problem it solves
 
-| Failure mode | Control |
-|---|---|
-| Unstated constraints | Ask the highest-leverage questions before choosing an implementation |
-| Hidden invariants and invalid transitions | Record what must always be true and how partial failures are handled |
-| Wrong runtime/framework guidance | Load only the matching pillar, runtime/reactivity tier, and framework module |
-| Unsafe writes by the agent | Enforce a deny-by-default policy for a repository's protected paths |
-| Stale or broken skill references | Validate frontmatter, routing clauses, chains, references, reviewers, and generated diagrams |
+AI agents can write code that looks correct while missing an important rule. Make It Right turns those rules into a short, repeatable workflow.
 
-The controls are deliberately layered. Skills are instructions the model follows; the optional harness is the filesystem boundary that can block a write.
+| Common request | What can go wrong | What Make It Right asks or checks |
+|---|---|---|
+| “Make payments retry-safe” | A retry charges the customer twice. | What happens when the same request is repeated? What proves it runs only once? |
+| “Change a database table” | A deploy locks the table or loses data. | How large is the table? Can the change be rolled back safely? |
+| “Add a user endpoint” | One user can read another user’s record. | Who is the user, and what gives them permission to see this record? |
+| “Update stock after checkout” | Two requests sell the same last item. | What happens when requests arrive at the same time? |
+| “Let the agent edit the project” | The agent changes secrets, hooks, or its own rules. | Which paths may it write, and which paths must always be protected? |
+
+The result is not a promise that every change is safe. It is a clearer conversation, better-matched guidance, and—when enabled—a real file-path check.
 
 ## How it works
 
-1. `install.sh` links the skill library and reviewer checklists into a host's discovery directories.
-2. A task matches skill descriptions. The matching bodies load progressively, from general constraints to framework mechanics.
-3. Gated pillars stop for human input at constraint interrogation, assumption confirmation, and design approval.
-4. `mir init` is optional. For one repository it records the stack, emits a thin baseline, installs hook wiring, and runs a manifest-derived probe.
-
-<!-- mir:gen:begin id=gates src=docs/gen_diagrams.py -->
-### The eight gates
-
-Every pillar runs the same eight gates. No implementation code is written before Gate 6, and the three amber gates stop and wait for a human.
+The main workflow is easy to summarize:
 
 ```mermaid
 flowchart LR
-    accTitle: The eight gates
-    accDescr: The eight Make It Right gates in order from Gate 0 Intent to Gate 7 Production-Readiness, with Gates 1, 2 and 5 marked as stopping for the user, and a rejected design review returning from Gate 5 to Gate 1
-    g0["Gate 0<br/>Intent and Triage"]
-    g1["Gate 1<br/>Constraint Interrogation"]
-    g2["Gate 2<br/>Assumption Ledger"]
-    g3["Gate 3<br/>Invariants and Failure Modes"]
-    g4["Gate 4<br/>Risk Register"]
-    g5["Gate 5<br/>Design Review"]
-    g6["Gate 6<br/>Implementation"]
-    g7["Gate 7<br/>Production-Readiness Review"]
+    accTitle: Make It Right workflow
+    accDescr: A task moves from questions to an agreed plan, implementation, and checks; the user can send the plan back for more questions
+    A[Describe the change] --> B[Answer the important questions]
+    B --> C[Agree on the plan]
+    C --> D[Build]
+    D --> E[Test and review]
+    C -. plan needs work .-> B
+```
+
+The highlighted steps below pause for your input. The agent should not quietly fill in an important blank.
+
+<!-- mir:gen:begin id=gates src=docs/gen_diagrams.py -->
+### The eight steps
+
+Every task follows the same eight steps. The three highlighted steps pause for your input, and the agent does not build before Step 6.
+
+```mermaid
+flowchart LR
+    accTitle: The eight steps
+    accDescr: The eight Make It Right steps from understanding the request to checking the result, with Steps 1, 2 and 5 pausing for the user, and a rejected plan returning to Step 1
+    g0["Step 0<br/>Understand the request"]
+    g1["Step 1<br/>Ask the important questions"]
+    g2["Step 2<br/>Confirm what we are assuming"]
+    g3["Step 3<br/>Check what must stay true"]
+    g4["Step 4<br/>List the main risks"]
+    g5["Step 5<br/>Agree on the plan"]
+    g6["Step 6<br/>Build it"]
+    g7["Step 7<br/>Check the result"]
     g0 --> g1
     g1 --> g2
     g2 --> g3
@@ -63,49 +94,73 @@ flowchart LR
     g5 --> g6
     g6 --> g7
     g5 -.->|rejected| g1
-    classDef usergate fill:#8a6116,stroke:#e3bd6b,color:#ffffff
-    class g1,g2,g5 usergate
+    classDef pause fill:#8a6116,stroke:#e3bd6b,color:#ffffff
+    class g1,g2,g5 pause
 ```
 
-Amber nodes are the three `[USER GATE]` stops -- the model must not proceed past them on its own. They are also named as user gates in the text version.
+Highlighted steps pause for your input. The agent must not move past them on its own.
 
 <details>
-<summary>Text version -- The eight gates</summary>
+<summary>Text version -- The eight steps</summary>
 
-1. Gate 0 -- Intent and Triage
-2. Gate 1 -- Constraint Interrogation (stops for the user)
-3. Gate 2 -- Assumption Ledger (stops for the user)
-4. Gate 3 -- Invariants and Failure Modes
-5. Gate 4 -- Risk Register
-6. Gate 5 -- Design Review (stops for the user)
-7. Gate 6 -- Implementation
-8. Gate 7 -- Production-Readiness Review
+1. Step 0 -- Understand the request
+2. Step 1 -- Ask the important questions (pauses for your input)
+3. Step 2 -- Confirm what we are assuming (pauses for your input)
+4. Step 3 -- Check what must stay true
+5. Step 4 -- List the main risks
+6. Step 5 -- Agree on the plan (pauses for your input)
+7. Step 6 -- Build it
+8. Step 7 -- Check the result
 
-Step 6 can return to step 2 when rejected.
+Step 5 can return to Step 1 when rejected.
 
 </details>
 
 <details>
-<summary>Links -- The eight gates</summary>
+<summary>Links -- The eight steps</summary>
 
-- [EXTENDING.md -- what each gate is for](EXTENDING.md)
+- [EXTENDING.md -- what each step does](EXTENDING.md)
 
 </details>
 <!-- mir:gen:end id=gates -->
 
-## The pillars
+## Supported hosts
 
-The repository is organized by engineering concern. The full catalog is generated from `init/catalog.py`; the map below is a compact overview.
+The installer targets four coding-agent hosts. A generated hook file is not the same as proof that a host will call it.
+
+| Host | What gets installed | Write protection |
+|---|---|---|
+| Claude Code | Skills, reviewer files, and project hook settings | Enforced and verified by the project probe |
+| Codex CLI | Skills and a project hook file | Hook file is created; host invocation is not proven |
+| Antigravity | Skills and a project hook file | Hook file is created; host invocation is not proven |
+| Cursor | Claude resources when its third-party configuration toggle is on | Advisory only; no Cursor-specific hook is emitted |
+
+`install.sh --tool=all` installs Claude Code, Codex CLI, and Antigravity. Cursor needs its own toggle and is not included in `all`.
+
+## What it covers
+
+| Area | Useful for | Skill family |
+|---|---|---|
+| Server and APIs | State changes, retries, concurrency, permissions, and external services | [`mir-backend`](skills/mir-backend/SKILL.md) |
+| Cloud and infrastructure | Provider choices, access, cost, and exit plans | [`mir-cloud`](skills/mir-cloud/SKILL.md) |
+| Databases | Tables, indexes, consistency, and safe structure changes | [`mir-database`](skills/mir-database/SKILL.md) |
+| Security and delivery | Secrets, dependencies, untrusted input, and releases | [`mir-devsecops`](skills/mir-devsecops/SKILL.md) |
+| Web applications | UI state, rendering, accessibility, and speed | [`mir-frontend`](skills/mir-frontend/SKILL.md) |
+| Mobile applications | App lifecycle, storage, background work, and store rules | [`mir-mobile`](skills/mir-mobile/SKILL.md) |
+| Project setup | Detecting a stack and creating the optional write guard | [`mir-init`](skills/mir-init/SKILL.md) |
+
+<details>
+<summary>Open the visual map of all areas</summary>
 
 <!-- mir:gen:begin id=pillar-map src=docs/gen_diagrams.py -->
-### Pillar map
+### The seven areas
 
-7 pillars, 52 skills in total. A pillar is the coarse gate; it loads on a matching task and hands off to a tier and then a module.
+7 broad areas, 52 skills in total. A task starts with the matching area and can then add runtime and framework guidance.
 
 ```mermaid
 flowchart LR
-    accTitle: Pillar map
-    accDescr: Map of the 7 Make It Right pillars, each labelled with how many tiers and modules sit below it
+    accTitle: The seven areas
+    accDescr: Map of the 7 Make It Right areas, each labelled with how many more specific skills sit below it
     r_mir["Make It Right"]
     p_mir_backend["mir-backend<br/>30 below"]
     p_mir_cloud["mir-cloud<br/>4 below"]
@@ -124,21 +179,21 @@ flowchart LR
 ```
 
 <details>
-<summary>Text version -- Pillar map</summary>
+<summary>Text version -- The seven areas</summary>
 
 - Make It Right
-  - mir-backend -- 30 tiers and modules below it
-  - mir-cloud -- 4 tiers and modules below it
-  - mir-database -- 2 tiers and modules below it
-  - mir-devsecops -- 0 tiers and modules below it
-  - mir-frontend -- 7 tiers and modules below it
-  - mir-init -- 0 tiers and modules below it
-  - mir-mobile -- 2 tiers and modules below it
+  - mir-backend -- 30 more specific skills below it
+  - mir-cloud -- 4 more specific skills below it
+  - mir-database -- 2 more specific skills below it
+  - mir-devsecops -- 0 more specific skills below it
+  - mir-frontend -- 7 more specific skills below it
+  - mir-init -- 0 more specific skills below it
+  - mir-mobile -- 2 more specific skills below it
 
 </details>
 
 <details>
-<summary>Links -- Pillar map</summary>
+<summary>Links -- The seven areas</summary>
 
 - [mir-backend](skills/mir-backend/SKILL.md) -- Backend / API
 - [mir-cloud](skills/mir-cloud/SKILL.md) -- Cloud / infra
@@ -151,48 +206,53 @@ flowchart LR
 </details>
 <!-- mir:gen:end id=pillar-map -->
 
-## Skill selection and the three-tier chain
+</details>
 
-The skill name encodes the routing chain because hosts scan `skills/` one level deep:
+## How guidance is chosen
 
-| Name | Role | Example |
+A task gets general guidance first, then more specific guidance:
+
+| Level | Meaning | Example |
 |---|---|---|
-| `mir-<pillar>` | Broad discipline and gates | `mir-backend` |
-| `mir-<pillar>-<runtime>` | Runtime or reactivity mechanics | `mir-backend-python`, `mir-frontend-react` |
-| `mir-<pillar>-<runtime>-<framework>` | Framework/library mechanics | `mir-backend-python-fastapi` |
+| Broad topic | The engineering area | Backend / API |
+| Runtime | How the code runs | Python |
+| Framework | The framework or library | FastAPI |
 
-A task that matches FastAPI loads the backend pillar, Python tier, and FastAPI module; the always-on `mir-devsecops` pillar is included in the resolved stack. The complete inventory and labels live in [`docs/skill-tree.md`](docs/skill-tree.md).
+For a FastAPI task, the agent receives backend, Python, and FastAPI guidance. Security and delivery guidance is included for every stack.
+
+<details>
+<summary>Open the FastAPI routing example</summary>
 
 <!-- mir:gen:begin id=chain-example src=docs/gen_diagrams.py -->
-### Coarse to fine, worked
+### A routing example
 
-`catalog.resolve()` turns one answer into this chain, ordered coarse to fine, so the general constraints are in context before the framework mechanics are.
+The catalog chooses the broad topic, then the runtime, then the framework. That gives the agent general guidance before stack-specific details.
 
 ```mermaid
 flowchart LR
-    accTitle: Coarse to fine, worked
-    accDescr: Chain for mir-backend-python-fastapi running from the pillar through the runtime tier to the framework module, plus the always-on security pillar
-    p_mir_backend["mir-backend<br/>pillar"]
-    t_mir_backend_python["mir-backend-python<br/>tier"]
-    m_mir_backend_python_fastapi["mir-backend-python-fastapi<br/>module"]
+    accTitle: A routing example
+    accDescr: Routing example for mir-backend-python-fastapi: broad topic, runtime, framework, plus the security guidance included for every stack
+    p_mir_backend["mir-backend<br/>broad topic"]
+    t_mir_backend_python["mir-backend-python<br/>runtime"]
+    m_mir_backend_python_fastapi["mir-backend-python-fastapi<br/>framework"]
     p_mir_devsecops["mir-devsecops<br/>always on"]
-    p_mir_backend -->|narrows to| t_mir_backend_python
-    t_mir_backend_python -->|narrows to| m_mir_backend_python_fastapi
+    p_mir_backend -->|gets more specific| t_mir_backend_python
+    t_mir_backend_python -->|gets more specific| m_mir_backend_python_fastapi
     p_mir_backend -.-> p_mir_devsecops
 ```
 
 <details>
-<summary>Text version -- Coarse to fine, worked</summary>
+<summary>Text version -- A routing example</summary>
 
-- mir-backend -- the pillar
-  - narrows to: mir-backend-python -- the tier
-    - narrows to: mir-backend-python-fastapi -- the module
-  - mir-devsecops -- resolved for every stack, never a question
+- mir-backend -- the broad topic
+  - gets more specific: mir-backend-python -- the runtime
+    - gets more specific: mir-backend-python-fastapi -- the framework
+  - mir-devsecops -- included for every stack
 
 </details>
 
 <details>
-<summary>Links -- Coarse to fine, worked</summary>
+<summary>Links -- A routing example</summary>
 
 - [mir-backend](skills/mir-backend/SKILL.md) -- Backend / API
 - [mir-backend-python](skills/mir-backend-python/SKILL.md) -- Python (framework not chosen)
@@ -202,25 +262,38 @@ flowchart LR
 </details>
 <!-- mir:gen:end id=chain-example -->
 
-## Progressive disclosure and token cost
+</details>
 
-Descriptions are visible for routing; full skill bodies and references load only when a task earns them. That keeps unrelated framework guidance out of the active context.
+## How instructions are loaded
+
+The host does not load every long document for every task.
+
+| When | What the agent sees |
+|---|---|---|
+| Before a task matches | Short descriptions used to find relevant guidance |
+| After a match | Full guidance for the matching area, runtime, and framework |
+| Only when needed | Reference files for the specific question |
+
+This keeps unrelated framework details out of the active conversation.
+
+<details>
+<summary>Open the context-loading diagram</summary>
 
 <!-- mir:gen:begin id=disclosure src=docs/gen_diagrams.py -->
-### Progressive disclosure and what it costs
+### How instructions are loaded
 
-Nothing below the first box is in context until it is earned. The token figures are measured from the files on disk at generation time, not estimated.
+The host sees short descriptions first. It loads full guidance only after a task matches it. Token figures come from the files on disk when this diagram is built.
 
 ```mermaid
 flowchart TD
-    accTitle: Progressive disclosure and what it costs
-    accDescr: Progressive disclosure -- descriptions are always resident, then a matching task loads the pillar, then the tier, then the module, and reference files load last
-    d_idle["52 descriptions resident<br/>~17400 tokens"]
-    d_match["Task text matches<br/>one description"]
-    d_mir_backend["pillar loads<br/>287 lines ~7100 tokens"]
-    d_mir_backend_python["tier loads<br/>132 lines ~5200 tokens"]
-    d_mir_backend_python_fastapi["module loads<br/>137 lines ~4900 tokens"]
-    d_refs["references/ load<br/>only when a gate says read them"]
+    accTitle: How instructions are loaded
+    accDescr: Only matching details load: the broad topic, then the runtime, then the framework; reference files load last
+    d_idle["52 short descriptions ready<br/>~17400 tokens"]
+    d_match["Task matches<br/>a description"]
+    d_mir_backend["broad topic details load<br/>287 lines ~7100 tokens"]
+    d_mir_backend_python["runtime details load<br/>132 lines ~5200 tokens"]
+    d_mir_backend_python_fastapi["framework details load<br/>137 lines ~4900 tokens"]
+    d_refs["reference files load<br/>only when needed"]
     d_idle --> d_match
     d_match --> d_mir_backend
     d_mir_backend --> d_mir_backend_python
@@ -229,57 +302,38 @@ flowchart TD
 ```
 
 <details>
-<summary>Text version -- Progressive disclosure and what it costs</summary>
+<summary>Text version -- How instructions are loaded</summary>
 
-1. Host idle -- all 52 skill descriptions are resident, about 17400 tokens
-2. A task arrives whose wording matches one description's TRIGGER clause
-3. mir-backend loads whole -- pillar, 287 body lines, about 7100 tokens
-4. mir-backend-python loads whole -- tier, 132 body lines, about 5200 tokens
-5. mir-backend-python-fastapi loads whole -- module, 137 body lines, about 4900 tokens
-6. reference files load last, and only when a gate tells the model to read one
+1. No task is running -- the host keeps 52 short skill descriptions ready, about 17400 tokens
+2. A task arrives whose wording matches a skill description
+3. mir-backend loads in full -- broad topic, 287 body lines, about 7100 tokens
+4. mir-backend-python loads in full -- runtime, 132 body lines, about 5200 tokens
+5. mir-backend-python-fastapi loads in full -- framework, 137 body lines, about 4900 tokens
+6. reference files load last, only when the task needs one
 
 </details>
 
 <details>
-<summary>Links -- Progressive disclosure and what it costs</summary>
+<summary>Links -- How instructions are loaded</summary>
 
-- [mir-backend](skills/mir-backend/SKILL.md) -- pillar, 287 body lines
-- [mir-backend-python](skills/mir-backend-python/SKILL.md) -- tier, 132 body lines
-- [mir-backend-python-fastapi](skills/mir-backend-python-fastapi/SKILL.md) -- module, 137 body lines
+- [mir-backend](skills/mir-backend/SKILL.md) -- broad topic, 287 body lines
+- [mir-backend-python](skills/mir-backend-python/SKILL.md) -- runtime, 132 body lines
+- [mir-backend-python-fastapi](skills/mir-backend-python-fastapi/SKILL.md) -- framework, 137 body lines
 
 </details>
 <!-- mir:gen:end id=disclosure -->
 
-## What it supports
+</details>
 
-### Engineering pillars
+## Quick start
 
-| Pillar | Covers |
-|---|---|
-| [`mir-backend`](skills/mir-backend/SKILL.md) | Stateful backend and API work across runtimes |
-| [`mir-cloud`](skills/mir-cloud/SKILL.md) | Provider selection, infrastructure constraints, cost, and exit risk |
-| [`mir-database`](skills/mir-database/SKILL.md) | Schema design, consistency, indexes, and safe migrations |
-| [`mir-devsecops`](skills/mir-devsecops/SKILL.md) | Untrusted input, dependencies, secrets, and delivery controls; always on |
-| [`mir-frontend`](skills/mir-frontend/SKILL.md) | Web UI state, rendering, accessibility, and performance |
-| [`mir-mobile`](skills/mir-mobile/SKILL.md) | Native lifecycle, storage, background work, and store rules |
-| [`mir-init`](skills/mir-init/SKILL.md) | Per-repository stack detection and write-policy harness generation |
+### Requirements
 
-### Host support
+- Bash
+- Git, if you are cloning the repository
+- Python 3 for validation and diagram checks
 
-`install.sh` can install the global resources. `mir init --target` chooses which host-specific repository harnesses to emit.
-
-| Host | Global resources | Harness wiring from `mir init` | Write-policy status |
-|---|---|---|---|
-| Claude Code | `~/.claude/skills`, `~/.claude/agents` | `.claude/settings.json` | **Enforced** — guard and registration are verified |
-| Codex CLI | `$CODEX_HOME/skills` (default `~/.codex/skills`); reviewers run inline | `.codex/hooks.json` | **Unverified** — file is emitted; host invocation is not proven |
-| Antigravity | `~/.gemini/config/skills` (or `GEMINI_HOME`); reviewers run inline | `.agents/hooks.json` | **Unverified** — file is emitted; host invocation is not proven |
-| Cursor | Reuses Claude resources only when its third-party config toggle is enabled | None by design | **Advisory / conditional** — no Cursor-specific hook is emitted |
-
-Cursor's toggle is **Include third-party Plugins, Skills, and other configs** under Settings → Rules, Skills, Subagents. It is user-level, not detected by this repository, and off until a human enables it. `install.sh --tool=all` installs Claude, Codex, and Antigravity; use `--tool=cursor` when Cursor is the target.
-
-## Installation
-
-### Quickstart
+### Install
 
 ```bash
 git clone https://github.com/anantbhandarkar/make-it-right.git ~/src/make-it-right
@@ -287,46 +341,53 @@ cd ~/src/make-it-right
 ./install.sh --tool=claude
 ```
 
-Restart or reload the agent so it indexes the new resources. Then describe a task in plain language, or invoke a specific skill such as `/mir-backend <task>`.
+Reload the coding-agent host after installation. Then describe the work you want done in plain language.
 
-`install.sh` creates symlinks, so edits in this checkout are visible to the installed resources after the host reloads. When `python3` and `validate.py` are available it validates first; validation errors stop the install. It does not overwrite a non-symlink destination.
+Choose another host with one of these commands:
 
-### Installation options
+```bash
+./install.sh --tool=codex
+./install.sh --tool=antigravity
+./install.sh --tool=all
+```
+
+Use `--tool=cursor` only when Cursor is configured to read third-party skills and configuration.
+
+### Install options
 
 | Command | Use |
 |---|---|
-| `./install.sh --tool=claude\|cursor\|codex\|antigravity\|all` | Select a host; default is Claude Code |
-| `./install.sh --scope=all` | Link every skill; default |
-| `./install.sh --scope=pillars` | Link only the seven broad pillars globally |
-| `./install.sh --prune --dry-run` | Preview stale links without changing disk |
-| `./install.sh --prune-only` | Remove only links this checkout can prove it owns |
-| `CLAUDE_HOME=... CODEX_HOME=... GEMINI_HOME=... ./install.sh` | Override target roots |
+| `./install.sh --scope=all` | Install every skill. This is the default. |
+| `./install.sh --scope=pillars` | Install only the seven broad areas globally. |
+| `./install.sh --prune --dry-run` | Preview stale links without changing your home directory. |
+| `./install.sh --prune-only` | Remove only links this checkout can prove it owns. |
+| `CLAUDE_HOME=... CODEX_HOME=... GEMINI_HOME=... ./install.sh` | Use different host directories. |
 
-For a small global index, install the pillars once and let each repository add its resolved tiers/modules:
+The installer creates symlinks, so edits in this checkout are visible after the host reloads. A normal install does not remove old links. Use pruning deliberately.
 
-```bash
-./install.sh --tool=claude --scope=pillars
-./bin/mir init /path/to/repo --install
-```
+## Protect one project
 
-Normal installation never removes old links. Use `--prune` deliberately when a skill was renamed, deleted, or when narrowing scope. `./bin/mir` is a thin CLI shim; it is not added to `PATH`.
-
-## Project harness (`mir init`)
-
-`install.sh` installs resources. `mir init` prepares one repository and installs no software or application code. It detects the stack, refuses to guess when a pillar is ambiguous or uncovered, and writes the harness all-or-nothing so a half-installed policy cannot look healthy.
-
-### Common commands
+Use `mir init` when one repository needs its own stack-specific guidance and a write boundary.
 
 ```bash
 ./bin/mir init /path/to/repo --target claude
-./bin/mir init . --dry-run
-./bin/mir init . --answers answers.json --noninteractive
-./bin/mir init . --install
-./bin/mir detect /path/to/repo
-./bin/mir catalog
 ```
 
-`--answers` is a JSON object keyed by pillar, for example:
+`mir init` installs no software and does not change application code. It:
+
+1. Looks at the repository and suggests possible matches.
+2. Stops if the repository is unclear instead of guessing.
+3. Writes the complete setup or writes nothing.
+4. Runs a probe to test the write checker.
+
+Preview or answer the choices yourself:
+
+```bash
+./bin/mir init . --dry-run
+./bin/mir init . --answers answers.json --noninteractive
+```
+
+Example `answers.json`:
 
 ```json
 {
@@ -335,17 +396,40 @@ Normal installation never removes old links. Use `--prune` deliberately when a s
 }
 ```
 
-`--noninteractive` forbids prompts; it does not authorize a guess. Ambiguity still stops with exit `3` and a paste-ready answers stub. `--target` accepts `claude`, `codex`, `antigravity`, `cursor`, a comma-separated list, or `all`; it defaults to `claude`.
+Use `--install` when the selected runtime and framework skills should also be installed for that project. Use `--target=all` to prepare every supported target.
+
+### Files created in the project
+
+| Path | What it is |
+|---|---|
+| `AGENTS.md` | Short project rules and the selected stack |
+| `CLAUDE.md` | Host-facing pointer to `AGENTS.md` |
+| `.mir/manifest.json` | The project paths that are allowed or protected |
+| `.mir/guard.py` | The checker that approves or stops a file write |
+| `.mir/probe.py` | A test that tries allowed and blocked writes |
+| `.mir/COVERAGE.md` | What the probe proved for each target |
+| Host hook file | Connects the host to the checker; Cursor has no hook |
+
+### The write rule
+
+- Protected paths stop.
+- Approved project paths continue.
+- All other paths stop.
+
+The checker itself and its rules live under `.mir/`, which is protected too.
+
+<details>
+<summary>Open the detailed `mir init` sequence</summary>
 
 <!-- mir:gen:begin id=init-flow src=docs/gen_diagrams.py -->
-### What `mir init` actually does
+### How `mir init` sets up a project
 
-Detection proposes and never decides, and the run is all-or-nothing: a harness that is half-installed looks installed and enforces nothing.
+`mir init` checks first, asks when the repository is unclear, writes the complete setup in one operation, and then tests it.
 
 ```mermaid
 sequenceDiagram
-    accTitle: What mir init actually does
-    accDescr: Sequence of a mir init run -- you invoke the CLI, it detects the stack and refuses to guess, you supply answers, catalog resolves the skill chain, generate plans and then writes every destination or none, and the probe verifies the guard blocks
+    accTitle: How mir init sets up a project
+    accDescr: Sequence for mir init: inspect the repository, ask for answers when needed, choose the matching skills, write the complete setup or nothing, then test the checker
     participant u as You
     participant cli as mir init
     participant det as detect.py
@@ -353,80 +437,71 @@ sequenceDiagram
     participant gen as generate.py
     participant repo as your repo
     u->>cli: mir init .
-    cli->>det: detect(repo)
-    det-->>cli: proposals and conflicts, never a decision
-    cli-->>u: if a pillar is undecided, refuse and list the options
+    cli->>det: inspect the repository
+    det-->>cli: possible matches and conflicts -- no decision made
+    cli-->>u: if anything is unclear, show choices and stop
     u->>cli: --answers answers.json
-    cli->>cat: resolve(answers)
-    cat-->>cli: chain-ordered skills plus recorded gaps
-    cli->>gen: plan(repo, skills, answers)
-    gen-->>cli: one item per destination, each classified first
-    cli->>gen: apply(repo, items) -- all destinations or none
-    gen->>repo: write .mir/, AGENTS.md, CLAUDE.md, merge .claude/settings.json
-    cli->>repo: run .mir/probe.py against the manifest
-    repo-->>u: exit 0 only if the guard actually blocked a denied write
+    cli->>cat: choose the matching skills
+    cat-->>cli: selected guidance and any missing areas
+    cli->>gen: prepare the files to write
+    gen-->>cli: one entry per destination, checked before writing
+    cli->>gen: write everything or nothing
+    gen->>repo: write .mir/, AGENTS.md, CLAUDE.md, merge settings
+    cli->>repo: run .mir/probe.py
+    repo-->>u: exit 0 only if the checker stopped a blocked write
 ```
 
 <details>
-<summary>Text version -- What `mir init` actually does</summary>
+<summary>Text version -- How `mir init` sets up a project</summary>
 
 1. You calls mir init (init/cli.py): mir init .
-2. mir init (init/cli.py) calls init/detect.py: detect(repo)
-3. init/detect.py replies to mir init (init/cli.py): proposals and conflicts, never a decision
-4. mir init (init/cli.py) replies to You: if a pillar is undecided, refuse and list the options
+2. mir init (init/cli.py) calls init/detect.py: inspect the repository
+3. init/detect.py replies to mir init (init/cli.py): possible matches and conflicts -- no decision made
+4. mir init (init/cli.py) replies to You: if anything is unclear, show choices and stop
 5. You calls mir init (init/cli.py): --answers answers.json
-6. mir init (init/cli.py) calls init/catalog.py: resolve(answers)
-7. init/catalog.py replies to mir init (init/cli.py): chain-ordered skills plus recorded gaps
-8. mir init (init/cli.py) calls init/generate.py: plan(repo, skills, answers)
-9. init/generate.py replies to mir init (init/cli.py): one item per destination, each classified first
-10. mir init (init/cli.py) calls init/generate.py: apply(repo, items) -- all destinations or none
-11. init/generate.py calls your repository: write .mir/, AGENTS.md, CLAUDE.md, merge .claude/settings.json
-12. mir init (init/cli.py) calls your repository: run .mir/probe.py against the manifest
-13. your repository replies to You: exit 0 only if the guard actually blocked a denied write
+6. mir init (init/cli.py) calls init/catalog.py: choose the matching skills
+7. init/catalog.py replies to mir init (init/cli.py): selected guidance and any missing areas
+8. mir init (init/cli.py) calls init/generate.py: prepare the files to write
+9. init/generate.py replies to mir init (init/cli.py): one entry per destination, checked before writing
+10. mir init (init/cli.py) calls init/generate.py: write everything or nothing
+11. init/generate.py calls your repository: write .mir/, AGENTS.md, CLAUDE.md, merge settings
+12. mir init (init/cli.py) calls your repository: run .mir/probe.py
+13. your repository replies to You: exit 0 only if the checker stopped a blocked write
 
 </details>
 
 <details>
-<summary>Links -- What `mir init` actually does</summary>
+<summary>Links -- How `mir init` sets up a project</summary>
 
 - [init/cli.py](init/cli.py) -- the flow above, in order
-- [init/detect.py](init/detect.py) -- proposes, never decides
-- [init/generate.py](init/generate.py) -- classifies every destination before writing
+- [init/detect.py](init/detect.py) -- finds possible matches, never decides
+- [init/generate.py](init/generate.py) -- checks every destination before writing
 
 </details>
 <!-- mir:gen:end id=init-flow -->
 
-### Generated project artifacts
+</details>
 
-| Path | Purpose |
-|---|---|
-| `AGENTS.md` | Thin always-on baseline: selected pillars, the hard rule, and recorded stack |
-| `CLAUDE.md` | Imports `AGENTS.md` and preserves a notes tail |
-| `.mir/manifest.json` | Allowed roots, denied paths, selected skills, and declared targets |
-| `.mir/guard.py` | Protocol-aware write guard; `.mir/` is protected from the agent |
-| `.mir/probe.py` | Replays manifest-derived attacks and checks wiring |
-| `.mir/COVERAGE.md` | Per-target capability, probe results, and unproven claims |
-| Host hook file | `.claude/settings.json`, `.codex/hooks.json`, or `.agents/hooks.json`; none for Cursor |
-
-The probe runs after generation. Read `.mir/COVERAGE.md` before relying on a harness: a clean probe proves the guard's decisions and the registration file, not that an unverified host actually invokes its hook. Restart Claude Code after generating a fresh hook because its hooks are loaded at session start.
+<details>
+<summary>Open the file-write decision diagram</summary>
 
 <!-- mir:gen:begin id=trust-boundary src=docs/gen_diagrams.py -->
-### The write policy, end to end
+### What happens before a file is written
 
-Deny by default, and denied paths beat allowed roots. The policy, the guard and the probe all live under `.mir/`, which is itself denied, so an agent cannot widen its own permissions.
+The checker allows writes only inside project paths marked as allowed. Protected paths always win; everything else stops. The rules and checker live under `.mir/`, which is protected too.
 
 ```mermaid
 flowchart TD
-    accTitle: The write policy, end to end
-    accDescr: Write policy decision flow -- a tool call reaches the PreToolUse guard, which reads the manifest, blocks anything under a denied path, allows what is under an allowed write root, and blocks everything else by default
+    accTitle: What happens before a file is written
+    accDescr: Write check flow: a file request reaches the checker, protected paths stop, allowed project paths continue, and all other paths stop
     w_call["Agent asks to write a file"]
-    w_hook["PreToolUse hook<br/>.mir/guard.py"]
-    w_policy["Read .mir/manifest.json"]
-    w_deny{"Under a denied path"}
-    w_root{"Under an allowed write root"}
-    w_blocked["BLOCKED<br/>exit 2, reason on stderr"]
-    w_default["BLOCKED by default<br/>no root matched"]
-    w_write["Write proceeds"]
+    w_hook["Write checker<br/>.mir/guard.py"]
+    w_policy["Read project rules"]
+    w_deny{"Protected path?"}
+    w_root{"Allowed project path?"}
+    w_blocked["STOP<br/>path is protected"]
+    w_default["STOP<br/>outside the project"]
+    w_write["CONTINUE<br/>write allowed"]
     w_call --> w_hook
     w_hook --> w_policy
     w_policy --> w_deny
@@ -440,24 +515,24 @@ flowchart TD
     class w_blocked,w_default denied
 ```
 
-Red nodes are refusals and the green node is the only path that writes. Both outcomes are spelled out in words in the text version.
+Red means stop. Green means the write is allowed.
 
 <details>
-<summary>Text version -- The write policy, end to end</summary>
+<summary>Text version -- What happens before a file is written</summary>
 
 - An agent asks to write a file
-  - The PreToolUse hook runs .mir/guard.py
-    - The guard reads .mir/manifest.json
-      - Is the target under a denied path (secrets, .git, .mir, the hook registration, home config)
-        - yes: BLOCKED -- denied paths win over allowed roots
-        - no: Is the target under an allowed write root
-          - yes: ALLOWED -- the write proceeds
-          - no: BLOCKED -- deny by default, nothing outside an allowed root is writable
+  - The host hook runs .mir/guard.py
+    - The checker reads .mir/manifest.json
+      - Is the target a protected path (secrets, .git, .mir, hook registration, home config)
+        - yes: STOP -- protected paths always win
+        - no: Is the target inside an allowed project path
+          - yes: CONTINUE -- the write is allowed
+          - no: STOP -- no allowed project path matched
 
 </details>
 
 <details>
-<summary>Links -- The write policy, end to end</summary>
+<summary>Links -- What happens before a file is written</summary>
 
 - [init/schema.py](init/schema.py) -- the baseline denied set, with the reason for each
 - [init/guard.py](init/guard.py) -- the hook that decides
@@ -466,32 +541,35 @@ Red nodes are refusals and the green node is the only path that writes. Both out
 </details>
 <!-- mir:gen:end id=trust-boundary -->
 
-## Validate and extend
+</details>
 
-```bash
-./validate.py
-./validate.py --json
-python3 docs/gen_diagrams.py --check
-python3 init/test_init.py
-```
+## Validate
 
-`validate.py` exits `0` when there are no errors, `1` for validation errors, and `2` when the skill tree cannot be read. Warnings are reported separately. Generated Mermaid blocks are owned by `docs/gen_diagrams.py`; do not edit between `mir:gen` markers. Use `--write` to regenerate them after changing the skill tree.
+Run these checks before sharing a change to the skill tree or installer:
 
-To add or reorganize skills, start with [`EXTENDING.md`](EXTENDING.md). The project harness and acceptance criteria are described in [`GOAL.md`](GOAL.md).
+| Command | What it checks |
+|---|---|---|
+| `./validate.py` | Skill files, names, links, references, reviewers, and project rules |
+| `python3 docs/gen_diagrams.py --check` | Generated diagrams are current |
+| `python3 init/test_init.py` | Project setup and write-guard behavior |
 
-## Honest limits
+Generated diagrams are owned by `docs/gen_diagrams.py`. Do not edit text inside `mir:gen` markers by hand. After changing the skill tree, run `python3 docs/gen_diagrams.py --write` and then run the checks above.
 
-- Skills are guidance. A model can ignore instructions; only the selected host's hook can enforce the repository write policy.
-- Codex CLI and Antigravity hook invocation is not proven by this repository. Cursor enforcement is conditional on its third-party configuration toggle.
-- The guard is a path policy, not a complete application security boundary. Read `.mir/COVERAGE.md` for exactly what the probe did and did not test.
-- `install.sh` is a Bash/symlink installer. There is no Windows or package-manager installation path in this repository.
+## Limits
 
-## Further reading
+- Skills are instructions, not enforcement. An agent can ignore them.
+- Claude Code is the only host whose hook invocation is verified here. Codex CLI and Antigravity create hook files, but this repository does not prove the host calls them.
+- Cursor support depends on its third-party configuration toggle and has no Cursor-specific hook.
+- The write checker protects file paths. It is not a complete application-security boundary and cannot make code inside an allowed path correct.
+- The installer uses Bash and symlinks. There is no Windows or package-manager installation path in this repository.
+- Counts and token figures in diagrams are generated from the files on disk. They are snapshots, not promises about every future checkout.
+
+## Learn more
 
 | Topic | Link |
-|---|---|
-| Complete skill inventory | [`docs/skill-tree.md`](docs/skill-tree.md) |
-| How to extend the tree | [`EXTENDING.md`](EXTENDING.md) |
+|---|---|---|
+| Full skill inventory | [`docs/skill-tree.md`](docs/skill-tree.md) |
+| Add or reorganize skills | [`EXTENDING.md`](EXTENDING.md) |
 | Goals and acceptance criteria | [`GOAL.md`](GOAL.md) |
 | Release process | [`RELEASING.md`](RELEASING.md) |
 | License and notice | [`LICENSE`](LICENSE) · [`NOTICE`](NOTICE) |

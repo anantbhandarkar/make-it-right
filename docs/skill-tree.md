@@ -28,17 +28,16 @@ diagram carries a separate **Links** list instead.
 ## What lives in the README instead
 
 Six of these blocks are hosted by `README.md`, because they are what a reader needs before
-they have decided to install anything: the pillar map, the worked coarse-to-fine chain, the
-progressive-disclosure model, the eight gates, the `mir init` sequence, and the write-policy
-trust boundary. The same id in two documents is a `DIA002` error, deliberately — two copies
+they have decided to install anything: the area map, the routing example, the instruction-
+loading model, the eight steps, the `mir init` sequence, and the file-write decision. The same id in two documents is a `DIA002` error, deliberately — two copies
 of a generated block cannot be kept in sync by anything — so they were **moved**, not
 copied.
 
-- [The eight gates](../README.md#the-eight-gates)
-- [Pillar map](../README.md#the-pillars)
-- [Coarse to fine, worked](../README.md#skill-selection-and-the-three-tier-chain)
-- [Progressive disclosure and what it costs](../README.md#progressive-disclosure-and-token-cost)
-- [What `mir init` does, and the write policy it installs](../README.md#project-harness-mir-init)
+- [The eight steps](../README.md#the-eight-steps)
+- [The seven areas](../README.md#what-it-covers)
+- [A routing example](../README.md#how-guidance-is-chosen)
+- [How instructions are loaded](../README.md#how-instructions-are-loaded)
+- [What `mir init` does, and the write rule it installs](../README.md#protect-one-project)
 
 What stays here is the inventory — one shard per pillar, too dense for a front page — and
 the placement decision for a new skill.

@@ -105,7 +105,7 @@ BACKEND_RUNTIME_GROUPS = [
 # Contrast of each fill against #ffffff text is >= 4.5:1 (WCAG AA for normal text).
 CLASSDEFS = {
     "planned": "fill:#4b5563,stroke:#9ca3af,color:#ffffff",
-    "usergate": "fill:#8a6116,stroke:#e3bd6b,color:#ffffff",
+    "pause": "fill:#8a6116,stroke:#e3bd6b,color:#ffffff",
     "denied": "fill:#8c2f2f,stroke:#f0a3a3,color:#ffffff",
     "allowed": "fill:#1f6f4a,stroke:#8fd0b0,color:#ffffff",
 }
@@ -372,15 +372,15 @@ def _pillar_map() -> Diagram:
         label = "%s<br/>%d below" % (slug, below)
         human = pillar_labels.get(pillar, "")
         nodes.append(Node(_nid(slug, planned), label,
-                          text="%s -- %d tiers and modules below it" % (slug, below)))
+                          text="%s -- %d more specific skills below it" % (slug, below)))
         edges.append(Edge("r_mir", _nid(slug, planned)))
         links.append(Link(slug, "skills/%s/SKILL.md" % slug if slug in known else "", human))
-    intro = ("%d pillars, %d skills in total. A pillar is the coarse gate; it loads on a "
-             "matching task and hands off to a tier and then a module."
+    intro = ("%d broad areas, %d skills in total. A task starts with the matching area and "
+             "can then add runtime and framework guidance."
              % (len(_pillars()), len(known)))
-    acc = ("Map of the %d Make It Right pillars, each labelled with how many tiers and "
-           "modules sit below it" % len(_pillars()))
-    return Diagram("pillar-map", "Pillar map", intro, acc, direction="LR",
+    acc = ("Map of the %d Make It Right areas, each labelled with how many more specific "
+           "skills sit below it" % len(_pillars()))
+    return Diagram("pillar-map", "The seven areas", intro, acc, direction="LR",
                    nodes=nodes, edges=edges, links=links)
 
 
@@ -393,7 +393,7 @@ def _chain_example() -> Diagram:
             "exists and change WORKED_EXAMPLE in %s." % (WORKED_EXAMPLE, SRC_REL))
     chain = catalog().chain_of(WORKED_EXAMPLE, known)
     nodes, edges, links = [], [], []
-    roles = {1: "pillar", 2: "tier", 3: "module"}
+    roles = {1: "broad topic", 2: "runtime", 3: "framework"}
     prev = None
     for slug in chain:
         nid = _nid(slug, planned)
@@ -401,22 +401,22 @@ def _chain_example() -> Diagram:
         nodes.append(Node(nid, "%s<br/>%s" % (slug, role),
                           text="%s -- the %s" % (slug, role)))
         if prev:
-            edges.append(Edge(prev, nid, label="narrows to"))
+            edges.append(Edge(prev, nid, label="gets more specific"))
         prev = nid
         links.append(Link(slug, "skills/%s/SKILL.md" % slug,
                           _label_for(slug, labels, pillar_labels)))
     always = catalog().ALWAYS
     if always in known:
         nodes.append(Node(_nid(always, planned), "%s<br/>always on" % always,
-                          text="%s -- resolved for every stack, never a question" % always))
+                          text="%s -- included for every stack" % always))
         edges.append(Edge(nodes[0].nid, _nid(always, planned), dotted=True))
         links.append(Link(always, "skills/%s/SKILL.md" % always,
                           _label_for(always, labels, pillar_labels)))
-    intro = ("`catalog.resolve()` turns one answer into this chain, ordered coarse to fine, "
-             "so the general constraints are in context before the framework mechanics are.")
-    acc = ("Chain for %s running from the pillar through the runtime tier to the framework "
-           "module, plus the always-on security pillar" % WORKED_EXAMPLE)
-    return Diagram("chain-example", "Coarse to fine, worked", intro, acc, direction="LR",
+    intro = ("The catalog chooses the broad topic, then the runtime, then the framework. "
+             "That gives the agent general guidance before stack-specific details.")
+    acc = ("Routing example for %s: broad topic, runtime, framework, plus the security "
+           "guidance included for every stack" % WORKED_EXAMPLE)
+    return Diagram("chain-example", "A routing example", intro, acc, direction="LR",
                    nodes=nodes, edges=edges, links=links)
 
 
@@ -447,14 +447,15 @@ def _disclosure() -> Diagram:
         raise DiagramError("the worked example %r does not exist under skills/" % WORKED_EXAMPLE)
     desc_chars = sum(_skill_text(s)[0] for s in sorted(known))
     chain = catalog().chain_of(WORKED_EXAMPLE, known)
-    roles = {1: "pillar", 2: "tier", 3: "module"}
+    roles = {1: "broad topic", 2: "runtime", 3: "framework"}
 
-    nodes = [Node("d_idle", "%d descriptions resident<br/>~%d tokens"
+    nodes = [Node("d_idle", "%d short descriptions ready<br/>~%d tokens"
                             % (len(known), _tokens(desc_chars)),
-                  text="Host idle -- all %d skill descriptions are resident, about %d tokens"
+                  text="No task is running -- the host keeps %d short skill descriptions ready, "
+                       "about %d tokens"
                        % (len(known), _tokens(desc_chars))),
-             Node("d_match", "Task text matches<br/>one description",
-                  text="A task arrives whose wording matches one description's TRIGGER clause")]
+             Node("d_match", "Task matches<br/>a description",
+                  text="A task arrives whose wording matches a skill description")]
     edges = [Edge("d_idle", "d_match")]
     links = []
     prev = "d_match"
@@ -463,21 +464,20 @@ def _disclosure() -> Diagram:
         chars = len((ROOT / "skills" / slug / "SKILL.md").read_text(encoding="utf-8"))
         nid = "d_%s" % slug.replace("-", "_")
         role = roles.get(_depth(slug), "module")
-        nodes.append(Node(nid, "%s loads<br/>%d lines ~%d tokens" % (role, lines, _tokens(chars)),
-                          text="%s loads whole -- %s, %d body lines, about %d tokens"
+        nodes.append(Node(nid, "%s details load<br/>%d lines ~%d tokens" % (role, lines, _tokens(chars)),
+                          text="%s loads in full -- %s, %d body lines, about %d tokens"
                                % (slug, role, lines, _tokens(chars))))
         edges.append(Edge(prev, nid))
         prev = nid
         links.append(Link(slug, "skills/%s/SKILL.md" % slug, "%s, %d body lines" % (role, lines)))
-    nodes.append(Node("d_refs", "references/ load<br/>only when a gate says read them",
-                      text="reference files load last, and only when a gate tells the model "
-                           "to read one"))
+    nodes.append(Node("d_refs", "reference files load<br/>only when needed",
+                      text="reference files load last, only when the task needs one"))
     edges.append(Edge(prev, "d_refs"))
-    intro = ("Nothing below the first box is in context until it is earned. The token figures "
-             "are measured from the files on disk at generation time, not estimated.")
-    acc = ("Progressive disclosure -- descriptions are always resident, then a matching task "
-           "loads the pillar, then the tier, then the module, and reference files load last")
-    return Diagram("disclosure", "Progressive disclosure and what it costs", intro, acc,
+    intro = ("The host sees short descriptions first. It loads full guidance only after a task "
+             "matches it. Token figures come from the files on disk when this diagram is built.")
+    acc = ("Only matching details load: the broad topic, then the runtime, then the framework; "
+           "reference files load last")
+    return Diagram("disclosure", "How instructions are loaded", intro, acc,
                    direction="TD", nodes=nodes, edges=edges, links=links)
 
 
@@ -488,14 +488,14 @@ def _disclosure() -> Diagram:
 
 
 GATES = [
-    ("0", "Intent and Triage", False),
-    ("1", "Constraint Interrogation", True),
-    ("2", "Assumption Ledger", True),
-    ("3", "Invariants and Failure Modes", False),
-    ("4", "Risk Register", False),
-    ("5", "Design Review", True),
-    ("6", "Implementation", False),
-    ("7", "Production-Readiness Review", False),
+    ("0", "Understand the request", False),
+    ("1", "Ask the important questions", True),
+    ("2", "Confirm what we are assuming", True),
+    ("3", "Check what must stay true", False),
+    ("4", "List the main risks", False),
+    ("5", "Agree on the plan", True),
+    ("6", "Build it", False),
+    ("7", "Check the result", False),
 ]
 
 
@@ -504,22 +504,21 @@ def _gates() -> Diagram:
     prev = None
     for num, name, is_user in GATES:
         nid = "g%s" % num
-        nodes.append(Node(nid, "Gate %s<br/>%s" % (num, name), cls="usergate" if is_user else "",
-                          text="Gate %s -- %s%s" % (num, name,
-                                                    " (stops for the user)" if is_user else "")))
+        nodes.append(Node(nid, "Step %s<br/>%s" % (num, name), cls="pause" if is_user else "",
+                          text="Step %s -- %s%s" % (num, name,
+                                                    " (pauses for your input)" if is_user else "")))
         if prev:
             edges.append(Edge(prev, nid))
         prev = nid
     edges.append(Edge("g5", "g1", label="rejected", dotted=True))
-    links = [Link("EXTENDING.md -- what each gate is for", "EXTENDING.md", "")]
-    intro = ("Every pillar runs the same eight gates. No implementation code is written "
-             "before Gate 6, and the three amber gates stop and wait for a human.")
-    acc = ("The eight Make It Right gates in order from Gate 0 Intent to Gate 7 "
-           "Production-Readiness, with Gates 1, 2 and 5 marked as stopping for the user, and "
-           "a rejected design review returning from Gate 5 to Gate 1")
-    legend = ("Amber nodes are the three `[USER GATE]` stops -- the model must not proceed "
-              "past them on its own. They are also named as user gates in the text version.")
-    return Diagram("gates", "The eight gates", intro, acc, direction="LR",
+    links = [Link("EXTENDING.md -- what each step does", "EXTENDING.md", "")]
+    intro = ("Every task follows the same eight steps. The three highlighted steps pause for "
+             "your input, and the agent does not build before Step 6.")
+    acc = ("The eight Make It Right steps from understanding the request to checking the result, "
+           "with Steps 1, 2 and 5 pausing for the user, and a rejected plan returning to Step 1")
+    legend = ("Highlighted steps pause for your input. The agent must not move past them on its "
+              "own.")
+    return Diagram("gates", "The eight steps", intro, acc, direction="LR",
                    nodes=nodes, edges=edges, links=links, legend=legend)
 
 
@@ -534,49 +533,49 @@ def _init_flow() -> Diagram:
     ]
     steps = [
         Step("u", "cli", "mir init ."),
-        Step("cli", "det", "detect(repo)"),
-        Step("det", "cli", "proposals and conflicts, never a decision", reply=True),
-        Step("cli", "u", "if a pillar is undecided, refuse and list the options", reply=True),
+        Step("cli", "det", "inspect the repository"),
+        Step("det", "cli", "possible matches and conflicts -- no decision made", reply=True),
+        Step("cli", "u", "if anything is unclear, show choices and stop", reply=True),
         Step("u", "cli", "--answers answers.json"),
-        Step("cli", "cat", "resolve(answers)"),
-        Step("cat", "cli", "chain-ordered skills plus recorded gaps", reply=True),
-        Step("cli", "gen", "plan(repo, skills, answers)"),
-        Step("gen", "cli", "one item per destination, each classified first", reply=True),
-        Step("cli", "gen", "apply(repo, items) -- all destinations or none"),
-        Step("gen", "repo", "write .mir/, AGENTS.md, CLAUDE.md, merge .claude/settings.json"),
-        Step("cli", "repo", "run .mir/probe.py against the manifest"),
-        Step("repo", "u", "exit 0 only if the guard actually blocked a denied write", reply=True),
+        Step("cli", "cat", "choose the matching skills"),
+        Step("cat", "cli", "selected guidance and any missing areas", reply=True),
+        Step("cli", "gen", "prepare the files to write"),
+        Step("gen", "cli", "one entry per destination, checked before writing", reply=True),
+        Step("cli", "gen", "write everything or nothing"),
+        Step("gen", "repo", "write .mir/, AGENTS.md, CLAUDE.md, merge settings"),
+        Step("cli", "repo", "run .mir/probe.py"),
+        Step("repo", "u", "exit 0 only if the checker stopped a blocked write", reply=True),
     ]
     links = [
         Link("init/cli.py", "init/cli.py", "the flow above, in order"),
-        Link("init/detect.py", "init/detect.py", "proposes, never decides"),
-        Link("init/generate.py", "init/generate.py", "classifies every destination before writing"),
+        Link("init/detect.py", "init/detect.py", "finds possible matches, never decides"),
+        Link("init/generate.py", "init/generate.py", "checks every destination before writing"),
     ]
-    intro = ("Detection proposes and never decides, and the run is all-or-nothing: a harness "
-             "that is half-installed looks installed and enforces nothing.")
-    acc = ("Sequence of a mir init run -- you invoke the CLI, it detects the stack and refuses "
-           "to guess, you supply answers, catalog resolves the skill chain, generate plans and "
-           "then writes every destination or none, and the probe verifies the guard blocks")
-    return Diagram("init-flow", "What `mir init` actually does", intro, acc, kind="sequence",
+    intro = ("`mir init` checks first, asks when the repository is unclear, writes the complete "
+             "setup in one operation, and then tests it.")
+    acc = ("Sequence for mir init: inspect the repository, ask for answers when needed, choose "
+           "the matching skills, write the complete setup or nothing, then test the checker")
+    return Diagram("init-flow", "How `mir init` sets up a project", intro, acc, kind="sequence",
                    nodes=nodes, steps=steps, links=links)
 
 
 def _trust_boundary() -> Diagram:
     nodes = [
         Node("w_call", "Agent asks to write a file", text="An agent asks to write a file"),
-        Node("w_hook", "PreToolUse hook<br/>.mir/guard.py",
-             text="The PreToolUse hook runs .mir/guard.py"),
-        Node("w_policy", "Read .mir/manifest.json", text="The guard reads .mir/manifest.json"),
-        Node("w_deny", "Under a denied path", shape="decision",
-             text="Is the target under a denied path (secrets, .git, .mir, the hook "
-                  "registration, home config)"),
-        Node("w_root", "Under an allowed write root", shape="decision",
-             text="Is the target under an allowed write root"),
-        Node("w_blocked", "BLOCKED<br/>exit 2, reason on stderr", cls="denied",
-             text="BLOCKED -- denied paths win over allowed roots"),
-        Node("w_default", "BLOCKED by default<br/>no root matched", cls="denied",
-             text="BLOCKED -- deny by default, nothing outside an allowed root is writable"),
-        Node("w_write", "Write proceeds", cls="allowed", text="ALLOWED -- the write proceeds"),
+        Node("w_hook", "Write checker<br/>.mir/guard.py",
+             text="The host hook runs .mir/guard.py"),
+        Node("w_policy", "Read project rules", text="The checker reads .mir/manifest.json"),
+        Node("w_deny", "Protected path?", shape="decision",
+             text="Is the target a protected path (secrets, .git, .mir, hook registration, "
+                  "home config)"),
+        Node("w_root", "Allowed project path?", shape="decision",
+             text="Is the target inside an allowed project path"),
+        Node("w_blocked", "STOP<br/>path is protected", cls="denied",
+             text="STOP -- protected paths always win"),
+        Node("w_default", "STOP<br/>outside the project", cls="denied",
+             text="STOP -- no allowed project path matched"),
+        Node("w_write", "CONTINUE<br/>write allowed", cls="allowed",
+             text="CONTINUE -- the write is allowed"),
     ]
     edges = [
         Edge("w_call", "w_hook"), Edge("w_hook", "w_policy"), Edge("w_policy", "w_deny"),
@@ -588,15 +587,13 @@ def _trust_boundary() -> Diagram:
         Link("init/guard.py", "init/guard.py", "the hook that decides"),
         Link("init/probe.py", "init/probe.py", "proves the guard really blocks"),
     ]
-    intro = ("Deny by default, and denied paths beat allowed roots. The policy, the guard and "
-             "the probe all live under `.mir/`, which is itself denied, so an agent cannot "
-             "widen its own permissions.")
-    acc = ("Write policy decision flow -- a tool call reaches the PreToolUse guard, which "
-           "reads the manifest, blocks anything under a denied path, allows what is under an "
-           "allowed write root, and blocks everything else by default")
-    legend = ("Red nodes are refusals and the green node is the only path that writes. Both "
-              "outcomes are spelled out in words in the text version.")
-    return Diagram("trust-boundary", "The write policy, end to end", intro, acc, direction="TD",
+    intro = ("The checker allows writes only inside project paths marked as allowed. Protected "
+             "paths always win; everything else stops. The rules and checker live under `.mir/`, "
+             "which is protected too.")
+    acc = ("Write check flow: a file request reaches the checker, protected paths stop, allowed "
+           "project paths continue, and all other paths stop")
+    legend = ("Red means stop. Green means the write is allowed.")
+    return Diagram("trust-boundary", "What happens before a file is written", intro, acc, direction="TD",
                    nodes=nodes, edges=edges, links=links, legend=legend)
 
 
@@ -766,9 +763,14 @@ def _text_version(d: Diagram) -> list:
         backs = [e for e in d.edges if pos.get(e.dst, 0) <= pos.get(e.src, 0)]
         if backs:
             lines.append("")
+            def return_label(nid):
+                label = by_id[nid].label.replace("<br/>", " -- ")
+                match = re.match(r"(Step|Gate) \d+", label)
+                return match.group(0) if match else "step %d" % (pos[nid] + 1)
+
             for e in backs:
-                lines.append("Step %d can return to step %d%s."
-                             % (pos[e.src] + 1, pos[e.dst] + 1,
+                lines.append("%s can return to %s%s."
+                             % (return_label(e.src), return_label(e.dst),
                                 " when %s" % e.label if e.label else ""))
         return lines
 
