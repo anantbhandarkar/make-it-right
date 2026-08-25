@@ -1,0 +1,170 @@
+name: Release
+
+# Fires on a pushed tag, never on a branch push -- see RELEASING.md for the full procedure
+# this enforces (VERSION bump, CHANGELOG entry, tag, push). Windows is out of scope for the
+# same reasons as ci.yml (bash install.sh, os.symlink, bare python3 in the generated hook).
+#
+# Every value that reaches a `run:` shell script below is passed through an `env:` block
+# first (TAG_INPUT / REF_NAME / TAG / VERSION), never interpolated directly as `${{ ... }}`
+# inside the script text. That is true even though the only two sources here are
+# `github.ref_name` (constrained by this workflow's own `v*` tag trigger) and a
+# `workflow_dispatch` text input gated behind repo write access -- routing through env: is
+# what keeps a crafted tag or input name from being pasted into the script as literal shell
+# text instead of a single argument value.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release (only for a manual re-run against an existing tag)"
+        required: true
+
+permissions:
+  contents: write # gh release create needs this; every other step only reads
+
+jobs:
+  release:
+    name: verify tag, run the gates, publish the release
+    runs-on: ubuntu-latest
+    env:
+      TAG_INPUT: ${{ github.event.inputs.tag }}
+      REF_NAME: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # `git describe`/tag lookups need full history, not the default shallow clone
+          ref: ${{ github.event.inputs.tag || github.ref_name }}
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+
+      - name: Resolve the tag under release
+        id: tag
+        run: |
+          set -euo pipefail
+          TAG="${TAG_INPUT:-$REF_NAME}"
+          case "$TAG" in
+            v*) VER="${TAG#v}" ;;
+            *) echo "::error::tag '$TAG' does not start with 'v' -- RELEASING.md's own procedure never produces one that doesn't" >&2; exit 1 ;;
+          esac
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+
+      - name: Assert VERSION matches the pushed tag
+        env:
+          TAG_VER: ${{ steps.tag.outputs.version }}
+        run: |
+          set -euo pipefail
+          FILE_VER="$(tr -d '[:space:]' < VERSION)"
+          if [ "$FILE_VER" != "$TAG_VER" ]; then
+            echo "::error::tag v$TAG_VER does not match the VERSION file ($FILE_VER). A tag" \
+                 "is not the source of truth here -- VERSION is (see docs/v2-plan.md," \
+                 "'Version source of truth'). Fix VERSION, commit, then re-tag." >&2
+            exit 1
+          fi
+          echo "OK: tag matches VERSION ($FILE_VER)"
+
+      - name: Assert CHANGELOG.md documents this version
+        id: changelog
+        env:
+          VERSION: ${{ steps.tag.outputs.version }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          import re
+          import sys
+
+          version = os.environ["VERSION"]
+          text = open("CHANGELOG.md", encoding="utf-8").read()
+
+          # One version's block: from its "## [X]" heading to the next "## [" heading (any
+          # version) or end of file. re.escape because a version string is data, not a
+          # pattern -- a stray "." would otherwise match any character.
+          m = re.search(
+              rf"^## \[{re.escape(version)}\].*?\n(.*?)(?=^## \[|\Z)",
+              text, re.MULTILINE | re.DOTALL,
+          )
+          if not m:
+              print(f"::error::CHANGELOG.md has no '## [{version}]' entry", file=sys.stderr)
+              sys.exit(1)
+          block = m.group(1)
+          print(f"OK: CHANGELOG.md documents {version}")
+
+          # Hand the Breaking-section text to the next step via a file rather than a step
+          # output: a changelog entry can contain characters ($, ", newlines) that a
+          # GITHUB_OUTPUT multiline write requires a random delimiter to carry safely, and a
+          # temp file sidesteps that entirely.
+          with open("changelog-block.txt", "w", encoding="utf-8") as f:
+              f.write(block)
+          PY
+
+      - name: A *.0.0 release must carry a non-empty ### Breaking section; a non-major must not
+        env:
+          VERSION: ${{ steps.tag.outputs.version }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          import re
+          import sys
+
+          version = os.environ["VERSION"]
+          block = open("changelog-block.txt", encoding="utf-8").read()
+          parts = version.split(".")
+          if len(parts) != 3 or not all(p.isdigit() for p in parts):
+              print(f"::error::'{version}' is not a plain MAJOR.MINOR.PATCH string", file=sys.stderr)
+              sys.exit(1)
+          major, minor, patch = parts
+          is_major_release = minor == "0" and patch == "0"
+
+          # The Breaking section, if present: from "### Breaking" to the next "### " heading
+          # or the end of this version's block.
+          m = re.search(r"^### Breaking\s*\n(.*?)(?=^### |\Z)", block, re.MULTILINE | re.DOTALL)
+          breaking_body = m.group(1).strip() if m else ""
+          # A line that only says "none" / "None." still counts as a real, present decision
+          # (v1.0.0's entry does exactly this: there is nothing to break on a first release,
+          # and CHANGELOG.md says so in the section rather than omitting it) -- so presence
+          # of ANY non-blank content is what "non-empty" means here, not a keyword check.
+          has_content = bool(breaking_body)
+
+          print(f"version={version}  is_major_release={is_major_release}  "
+                f"breaking_section_present={m is not None}  has_content={has_content}")
+
+          if is_major_release and not has_content:
+              print(f"::error::v{version} is a *.0.0 release; CHANGELOG.md's ### Breaking "
+                    "section for it is missing or empty. A major version's entire point is "
+                    "the breaking change -- state it, even if the state is deliberately "
+                    "'None: <why>' for a first release.", file=sys.stderr)
+              sys.exit(1)
+          if not is_major_release and has_content:
+              print(f"::error::v{version} is not a *.0.0 release, but CHANGELOG.md's "
+                    "### Breaking section for it is non-empty. Either this needs to ship as "
+                    "the next MAJOR instead, or the content belongs under ### Changed / "
+                    "### Upgrading and ### Breaking should be removed.", file=sys.stderr)
+              sys.exit(1)
+          print("OK: ### Breaking presence matches the version's MAJOR-ness")
+          PY
+
+      - name: Run the same gates CI runs (validate + full test suite)
+        run: |
+          set -euo pipefail
+          python3 validate.py --quiet
+          python3 init/test_init.py
+
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          # changelog-block.txt already holds exactly this version's section (written by
+          # the "Assert CHANGELOG.md documents this version" step above) -- reused as the
+          # release body instead of re-deriving it, so the two can never disagree.
+          gh release create "$TAG" \
+            --title "$TAG" \
+            --notes-file changelog-block.txt \
+            --verify-tag

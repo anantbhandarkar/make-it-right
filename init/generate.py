@@ -349,7 +349,7 @@ def plan(repo: str, resolved: list[str], answers: dict, stamp: str) -> list[dict
     return items
 
 
-def install_project_skills(repo: str, resolved: list[str], repo_dir: str) -> list[str]:
+def install_project_skills(repo: str, resolved: list[str], repo_dir: str = None) -> list[str]:
     """Symlink this repo's tiers/modules into <repo>/.claude/skills/.
 
     Claude Code merges ~/.claude/skills with <repo>/.claude/skills, so with a global
@@ -359,7 +359,19 @@ def install_project_skills(repo: str, resolved: list[str], repo_dir: str) -> lis
 
     Depth-1 slugs are skipped: they are the global floor, and personal skills take
     precedence over project skills anyway, so a local copy would be shadowed.
+
+    `repo_dir` defaults to this file's checkout, matching prune_project_skills, so existing
+    two-argument call sites keep working unchanged.
+
+    An existing `mir-<slug>` link is only replaced if it resolves inside `repo_dir` --
+    the same _owned_by test prune uses. Without it, a name mir itself would resolve is
+    enough to overwrite whatever that name points at, which can be a user's own
+    `mir-frontend-react` link into a different checkout or their own edited copy. That is
+    the same class of bug prune had (finding 9), just narrower: it only touches names mir
+    itself would install, where prune's hole could touch any `mir-*` name at all.
     """
+    if repo_dir is None:
+        repo_dir = os.path.dirname(HERE)
     dest_dir = os.path.join(repo, ".claude", "skills")
     os.makedirs(dest_dir, exist_ok=True)
     linked = []
@@ -372,6 +384,12 @@ def install_project_skills(repo: str, resolved: list[str], repo_dir: str) -> lis
         dst = os.path.join(dest_dir, slug)
         if os.path.lexists(dst) and not os.path.islink(dst):
             continue                      # never clobber a real directory
+        if os.path.islink(dst) and not _owned_by(dst, repo_dir):
+            # Points somewhere mir did not put it -- a foreign checkout or a user's own
+            # edited copy wearing the same slug name. KEEP, same messaging style as prune.
+            print("KEEP %s -- points outside %s, not mir's to replace" %
+                  (os.path.relpath(dst, repo), repo_dir))
+            continue
         if os.path.islink(dst):
             os.unlink(dst)                # lexists, not exists: a dangling link is still there
         os.symlink(src, dst)
@@ -419,6 +437,73 @@ def prune_project_skills(repo: str, keep: list[str], repo_dir: str = None) -> li
         os.unlink(p)
         removed.append(name)
     return removed
+
+
+# -- settings.local.json: inspected, never written -------------------------------------
+#
+# Claude Code merges .claude/settings.json AND .claude/settings.local.json, and either can
+# carry a PreToolUse hook (probe.py's wiring phase already reads both -- see
+# find_wiring_entries there). mir only MERGES settings.json: settings.local.json is
+# conventionally gitignored and per-developer, so mir writing into it would put a shared
+# tool's hand in a file the checked-in repo never sees and the user did not ask mir to
+# manage. That argues for leaving it alone entirely.
+#
+# But a stale mir-tagged entry sitting there is not a neutral fact: the user believes a
+# hook is armed, the probe may even call it "wired" because the tag or the guard.py command
+# is present, and the matcher underneath has drifted so the guard never actually fires.
+# Silence there is worse than the merge silence would be, because it reads as protected and
+# is not. So mir inspects this file read-only -- it is not a write target, so it never goes
+# through inspect_destination/apply() -- and hands back findings for the CLI layer to print.
+# This function performs no I/O beyond a read and never raises for a file mir does not own:
+# an unreadable or unparseable settings.local.json is reported as "could not check", not a
+# GenerateError, because refusing the whole run over a file mir was never going to touch
+# would be a bigger overreach than the silent-drift it exists to catch.
+LOCAL_SETTINGS_REL = os.path.join(".claude", "settings.local.json")
+
+
+def local_settings_warnings(repo: str, guard_rel: str = ".mir/guard.py") -> list[str]:
+    """Human-readable warnings about a stale mir-tagged PreToolUse hook in
+    `.claude/settings.local.json`. Empty when there is nothing to report: the file is
+    absent, unreadable/unparseable (best-effort only -- mir does not own this file), has no
+    `hooks.PreToolUse` list, or every mir-tagged entry already matches the desired shape.
+
+    Callers are expected to print these loudly and otherwise leave the file untouched --
+    this function never writes anything and is not part of plan()/apply().
+    """
+    path = os.path.join(repo, LOCAL_SETTINGS_REL)
+    if os.path.islink(path) or not os.path.isfile(path):
+        return []  # absent, or a link mir will not follow to inspect
+    try:
+        with open(path, encoding="utf-8") as f:
+            settings = json.load(f)
+    except (OSError, UnicodeDecodeError, ValueError) as e:
+        return ["%s could not be read as JSON (%s), so mir could not check it for a stale "
+                "mir-tagged hook. mir does not own this file and will not fix it for you."
+                % (LOCAL_SETTINGS_REL, e)]
+    if not isinstance(settings, dict):
+        return []
+    hooks = settings.get("hooks")
+    pre = hooks.get("PreToolUse") if isinstance(hooks, dict) else None
+    if not isinstance(pre, list):
+        return []
+
+    cmd = f'python3 "$CLAUDE_PROJECT_DIR/{guard_rel}"'
+    findings = []
+    for entry in pre:
+        if not isinstance(entry, dict) or not _mir_hook_entry(entry, cmd):
+            continue
+        matcher = entry.get("matcher")
+        entry_hooks = entry.get("hooks") if isinstance(entry.get("hooks"), list) else []
+        cmds = [h.get("command") for h in entry_hooks if isinstance(h, dict)]
+        if matcher == MATCHER and cmd in cmds:
+            continue  # this entry is exactly the desired shape: nothing to report
+        findings.append(
+            "%s has a mir-tagged PreToolUse hook that is STALE: matcher=%r, command(s)=%r "
+            "-- does not match the desired matcher %r / command %r. mir will not rewrite "
+            "this file (it is conventionally gitignored and per-developer); fix the entry "
+            "by hand, or delete it and re-run `mir init` so the guard actually fires."
+            % (LOCAL_SETTINGS_REL, matcher, cmds, MATCHER, cmd))
+    return findings
 
 
 def _preserve_tail(dest: str, disposition: str, new_content: str) -> str:

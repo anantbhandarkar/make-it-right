@@ -6,8 +6,14 @@ green report that proves nothing. The containment kit attacks a fixed list of se
 paths; that tells you the OS sandbox works, not that YOUR generated hook enforces YOUR
 policy. This probe instead reads the manifest and attacks the guard with:
 
-  - every denied_path              -> expected BLOCK
-  - a path just inside each         -> expected BLOCK   (e.g. .git/hooks/x under .git)
+  - every denied_path              -> expected BLOCK. A `~`-rooted or absolute entry is fired
+    EXPANDED (`/Users/you/.ssh`, not the four characters `~/.ssh`), because the guard expands
+    `~` on both sides and a tilde-vs-tilde row proves only that two expansions cancel -- not
+    that a real absolute write into $HOME is stopped.
+  - a path just inside each         -> expected BLOCK   (e.g. .git/hooks/x under .git), but
+    only where a child could exist. An entry that is a regular file on this machine gets no
+    child row: `~/.gitconfig/child-file` is unreachable, so the guard blocks it by prefix and
+    the row passes without ever being able to fail.
   - for a denied PATTERN, concrete instantiations of it at several depths and with several
     suffixes -> expected BLOCK. Replaying only the literal entry is what let `.env` pass
     while `src/.env` and `.env.development` sailed through: the probe ran green because it
@@ -20,6 +26,25 @@ Each attack is a real PreToolUse event (Write, and the partial-coverage Bash for
 the actual guard.py, judged by its exit code. The report also prints what was NOT tested
 (Bash beyond simple redirects, MCP writes, apply_patch), because a probe that hides its
 blind spots is the laundering both reviewers warned about.
+
+NOTHING HERE EVER OPENS A TARGET FOR WRITING. An attack is a JSON event and an exit code;
+the only filesystem call made on an attack path is a read-only stat, used to ask whether an
+entry is a file. That is what makes it safe to fire `/Users/you/.ssh/child-file` at the
+guard: the path is judged, never touched. Any future edit that opens an attack path breaks
+the one property that lets this file attack a user's real home.
+
+Each BLOCK row carries what it PROVES, because "blocked" is not one claim:
+
+  rule             the target is inside an allowed_write_root, so only the denied entry can
+                   have blocked it. The row isolates the rule it names.
+  deny-by-default  the target is outside every allowed_write_root, so the fallback blocks it
+                   whether or not the entry works. The row is real coverage of deny-by-default
+                   and NO coverage of the rule printed beside it. Every `~/...` entry is this
+                   shape by construction and cannot be made otherwise -- a home path cannot be
+                   moved inside the repo. Saying so is the point: an over-determined row read
+                   as rule coverage is exactly the number-inflation this file exists against.
+  pattern-literal  the entry could not be instantiated, so its own spelling was fired. No
+                   agent writes a path containing `*`; the row is a placeholder, not a test.
 
 A WIRING phase runs alongside the attacks. Every attack above invokes guard.py DIRECTLY, so
 none of them reads .claude/settings.json -- a stale matcher would leave structured writes
@@ -106,6 +131,64 @@ def bash_write_event(path: str, cwd: str) -> dict:
 
 def _sample_under(root_rel: str) -> str:
     return os.path.join(root_rel, ".mir-probe-canary")
+
+
+def _abs(path: str, repo_root: str) -> str:
+    """The absolute path a probe string names, for arithmetic only.
+
+    `~` is expanded and a relative path is joined to the repo root, so both sides of every
+    containment question below are spelled the same way. normpath, not realpath: this is a
+    label, not a verdict, and the guard owns canonicalisation.
+    """
+    p = os.path.expanduser(path)
+    return os.path.normpath(p if os.path.isabs(p) else os.path.join(repo_root, p))
+
+
+def _is_under(path: str, root: str) -> bool:
+    """Lexical containment, `root + os.sep` so `.mir-probe-canary` is not read as under
+    `.mir`. Duplicated from guard.py for the same reason is_glob is: probe.py is copied
+    standalone into .mir/ and has nothing to import from."""
+    path, root = os.path.normpath(path), os.path.normpath(root)
+    return path == root or path.startswith(root + os.sep)
+
+
+def _inside_allowed(path: str, policy: dict, repo_root: str) -> bool:
+    """Would deny-by-default alone block this path? If it is inside an allowed root, no --
+    which is what makes a BLOCK there attributable to the denied entry rather than to the
+    fallback."""
+    return any(_is_under(_abs(path, repo_root), _abs(r, repo_root))
+               for r in policy.get("allowed_write_roots", []))
+
+
+def _attack_spelling(entry: str, repo_root: str) -> str:
+    """How a denied entry is written into the event it is fired as.
+
+    A `~`-rooted or absolute entry is fired EXPANDED, because that is the write an agent
+    would actually attempt and it is the only spelling that tests an absolute path landing in
+    $HOME -- the guard expands `~` on both the entry side and the target side, so firing the
+    tilde back at it proves only that the two expansions agree. A repo-relative entry stays
+    relative: that is how a tool reports its own target, and it keeps the report readable.
+    """
+    return _abs(entry, repo_root) if entry.startswith("~") or os.path.isabs(entry) else entry
+
+
+def _can_have_children(entry: str, repo_root: str) -> bool:
+    """Could a write ever land BELOW this entry?
+
+    Not if the entry is a regular file on this machine: `~/.gitconfig/child-file` is a path
+    the filesystem cannot produce, so the guard blocks it by prefix and the row passes
+    without being able to fail. A row that cannot fail is worse than no row, because the
+    count it inflates gets read as coverage.
+
+    A path that does not exist keeps its child attack. It could still be created as a
+    directory, and guessing "file" would drop a row that CAN fail -- the one error worse than
+    keeping one that cannot. So this reports what is true on the machine the probe ran on,
+    which is also the machine whose home directory is at stake.
+
+    os.path.isfile is a read-only stat. It is the only filesystem call this file makes on an
+    attack path, and it must stay that way; see the module docstring.
+    """
+    return not os.path.isfile(_abs(entry, repo_root))
 
 
 def _escape_path(repo_root: str) -> str:
@@ -205,15 +288,23 @@ def expand_glob_attacks(entry: str) -> list[str]:
     return uniq
 
 
-def denied_attack_paths(entry: str) -> list[str]:
+def denied_attack_paths(entry: str, repo_root: str = ".") -> list[str]:
     """The concrete paths to fire at one denied_paths entry.
 
     A pattern that cannot be instantiated falls back to the literal entry, so an exotic
-    pattern is still attacked (weakly) rather than silently dropped from the report.
+    pattern is still attacked (weakly) rather than silently dropped from the report; the row
+    is labelled `pattern-literal` so the weakness is on the page rather than in the count.
+
+    repo_root is what `~` and a relative entry resolve against. It defaults to the cwd's
+    spelling so the function stays callable for pure pattern questions, but the prober always
+    passes the repo it is attacking -- an entry's shape is a fact about a specific tree.
     """
-    if not is_glob(entry):
-        return [entry, os.path.join(entry, "child-file")]  # e.g. .git and .git/hooks/pre-commit
-    return expand_glob_attacks(entry) or [entry]
+    if is_glob(entry):
+        return [_attack_spelling(p, repo_root) for p in expand_glob_attacks(entry)] or [entry]
+    target = _attack_spelling(entry, repo_root)
+    if not _can_have_children(entry, repo_root):
+        return [target]
+    return [target, os.path.join(target, "child-file")]  # e.g. .git and .git/hooks/pre-commit
 
 
 # ---------------------------------------------------------------- wiring phase
@@ -372,44 +463,84 @@ def wiring_report(repo_root: str, guard_path: str) -> dict:
             "failures": failures, "why": ""}
 
 
+PROVES_RULE = "rule"
+PROVES_DEFAULT = "deny-by-default"
+PROVES_LITERAL = "pattern-literal"
+
+
+def proves(attack: dict, policy: dict, repo_root: str) -> str:
+    """What a BLOCK on this row would actually establish. See the module docstring for the
+    three values and why the distinction is the report's whole job."""
+    if attack["expect"] != BLOCK:
+        return ""
+    if is_glob(attack["path"]):
+        return PROVES_LITERAL
+    return PROVES_RULE if _inside_allowed(attack["path"], policy, repo_root) else PROVES_DEFAULT
+
+
 def build_attacks(manifest: dict, repo_root: str) -> list[dict]:
     policy = manifest["policy"]
     attacks: list[dict] = []
 
     for d in policy.get("denied_paths", []):
-        for p in denied_attack_paths(d):
-            attacks.append({"path": p, "expect": BLOCK,
+        for p in denied_attack_paths(d, repo_root):
+            attacks.append({"path": p, "expect": BLOCK, "names_entry": True,
                             "why": f"denied_path {d}", "kind": "write"})
 
     for r in policy.get("allowed_write_roots", []):
         # a normal file under an allowed root that is not itself denied -> must pass
-        attacks.append({"path": _sample_under(r), "expect": ALLOW,
+        attacks.append({"path": _sample_under(r), "expect": ALLOW, "names_entry": False,
                         "why": f"normal file under allowed root {r}", "kind": "write"})
 
     # deny-by-default: a path outside every allowed root (outside the repo when root is '.')
-    attacks.append({"path": _escape_path(repo_root), "expect": BLOCK,
+    attacks.append({"path": _escape_path(repo_root), "expect": BLOCK, "names_entry": False,
                     "why": "outside every allowed_write_root", "kind": "write"})
 
     # self-protection: the policy must not let the agent rewrite the policy or the guard
-    attacks.append({"path": ".mir/manifest.json", "expect": BLOCK,
+    attacks.append({"path": ".mir/manifest.json", "expect": BLOCK, "names_entry": False,
                     "why": "the policy must protect itself", "kind": "write"})
 
-    # Bash redirects into denied targets, to exercise the partial-coverage path. Two of them:
-    # the first denied entry, and a NESTED instantiation of the first denied pattern -- the
-    # shell is the likeliest way `echo KEY=... > src/.env` actually gets attempted.
+    # Bash redirects into denied targets, to exercise the partial-coverage path: the first
+    # denied entry, plus a NESTED instantiation of EVERY denied pattern, because the shell is
+    # the likeliest way `echo KEY=... > src/.env` actually gets attempted.
+    #
+    # One row per pattern, not one per instantiation. The pattern is the axis Bash coverage
+    # varies along -- each pattern is a separate rule that may or may not be wired into the
+    # shell parser -- while nine near-identical redirects into the same rule would pad the
+    # count without asking a new question. So the row total stays linear in the manifest's own
+    # denied_paths, never combinatorial in it.
+    #
+    # A `break` used to end this loop after the FIRST pattern. With two patterns in the
+    # baseline policy that left `**/.env*` -- the one entry whose whole reason for existing is
+    # the shell redirect named above -- with no Bash attack at all.
     denied = policy.get("denied_paths", [])
+    shell: list = []
     if denied:
-        shell_targets = denied_attack_paths(denied[0])
-        attacks.append({"path": shell_targets[-1], "expect": BLOCK,
-                        "why": f"shell redirect into denied {denied[0]}", "kind": "bash"})
+        shell.append((denied_attack_paths(denied[0], repo_root)[-1],
+                      f"shell redirect into denied {denied[0]}"))
     for d in denied:
-        if is_glob(d):
-            nested = [p for p in expand_glob_attacks(d) if "/" in p]
-            if nested:
-                attacks.append({"path": nested[-1], "expect": BLOCK,
-                                "why": f"shell redirect into nested {d}", "kind": "bash"})
-            break
+        if not is_glob(d):
+            continue
+        nested = [p for p in denied_attack_paths(d, repo_root) if "/" in p.strip("/")]
+        if not nested:
+            continue
+        # Prefer an instantiation INSIDE an allowed root: outside one, deny-by-default blocks
+        # the redirect whatever the pattern does and the row stops isolating the rule.
+        inside = [p for p in nested if _inside_allowed(p, policy, repo_root)]
+        shell.append(((inside or nested)[-1], f"shell redirect into nested {d}"))
 
+    seen = set()
+    for path, why in shell:
+        # Deduplicated on the path: when denied[0] is itself a pattern its two rows collide,
+        # and the same command fired twice is one question printed twice.
+        if path in seen:
+            continue
+        seen.add(path)
+        attacks.append({"path": path, "expect": BLOCK, "names_entry": True,
+                        "why": why, "kind": "bash"})
+
+    for a in attacks:
+        a["proves"] = proves(a, policy, repo_root)
     return attacks
 
 
@@ -464,15 +595,32 @@ def render(report: dict) -> str:
     passed = sum(1 for r in report["results"] if r["ok"])
     lines.append(f"{passed}/{len(report['results'])} attacks behaved as the policy requires")
     lines.append("")
+
+    # The count above is the number people read as coverage, so the rows it cannot support
+    # are named immediately under it rather than in a footnote.
+    named = [r for r in report["results"] if r.get("names_entry")]
+    weak = [r for r in named if r.get("proves") != PROVES_RULE]
+    if weak:
+        lines.append(f"{len(weak)} of those {len(named)} rows name a denied_paths entry they do")
+        lines.append("not isolate. See the `proves` column: `deny-by-default` means the target")
+        lines.append("is outside every allowed_write_root, so the fallback blocks it whether or")
+        lines.append("not the entry works, and `pattern-literal` means the entry could not be")
+        lines.append("instantiated and its own spelling was fired. Read those as coverage of")
+        lines.append("deny-by-default and of nothing else.")
+        lines.append("")
+
     # The tool column is not decoration: a Write and a Bash attack on the same path are
     # different claims (Bash coverage is partial), and without it the two rows read as a
-    # duplicate.
-    lines.append("| target | via | expected | got | ok |")
-    lines.append("|---|---|---|---|---|")
+    # duplicate. Neither is `proves`: two BLOCK rows that look identical can be one real test
+    # and one tautology.
+    lines.append("| target | via | expected | got | proves | ok |")
+    lines.append("|---|---|---|---|---|---|")
     for r in report["results"]:
         mark = "yes" if r["ok"] else "**NO**"
         via = "Bash" if r["kind"] == "bash" else "Write"
-        lines.append(f"| `{r['path']}` | {via} | {r['expect_label']} | {r['got']} | {mark} |")
+        shows = r.get("proves") or "--"
+        lines.append(f"| `{r['path']}` | {via} | {r['expect_label']} | {r['got']} "
+                     f"| {shows} | {mark} |")
     lines.append("")
     if report["leaks"]:
         lines.append("## LEAKS -- a denied path was not blocked (shipping blocker)")

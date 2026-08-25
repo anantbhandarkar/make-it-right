@@ -404,3 +404,129 @@ def run(check):
         check("MUTATION: with O_NOFOLLOW gone too, the external file IS truncated",
               "# shared" not in _read(outside), _read(outside)[:80])
         shutil.rmtree(os.path.join(tmp, "mutant-b"), ignore_errors=True)
+
+    # -- G1: install_project_skills applies the same _owned_by predicate prune does ---------
+    with tempfile.TemporaryDirectory() as tmp:
+        repo = _repo(tmp)
+        checkout = os.path.join(tmp, "checkout")
+        os.makedirs(os.path.join(checkout, "skills", "mir-frontend-react"))
+        foreign_target = os.path.join(tmp, "someone-elses-checkout", "mir-frontend-react")
+        os.makedirs(foreign_target)
+        sk = os.path.join(repo, ".claude", "skills")
+        os.makedirs(sk)
+        os.symlink(foreign_target, os.path.join(sk, "mir-frontend-react"))
+        os.makedirs(os.path.join(sk, "mir-devsecops"))  # a real directory, never touched
+
+        linked = gen.install_project_skills(
+            repo, ["mir-frontend", "mir-frontend-react", "mir-devsecops"], checkout)
+        check("install does not link a slug whose name already points OUTSIDE the checkout",
+              "mir-frontend-react" not in linked, str(linked))
+        check("the foreign link survives install untouched",
+              os.path.realpath(os.path.join(sk, "mir-frontend-react"))
+              == os.path.realpath(foreign_target))
+        check("a real directory named mir-devsecops is never replaced by a symlink",
+              os.path.isdir(os.path.join(sk, "mir-devsecops"))
+              and not os.path.islink(os.path.join(sk, "mir-devsecops")))
+
+        # a link that already points INSIDE the checkout is replaced normally (re-run
+        # idempotence). Two dashes -- a tier/module, not a pillar -- so install does not skip
+        # it the way it skips depth-1 slugs.
+        os.makedirs(os.path.join(checkout, "skills", "mir-backend-go"))
+        os.symlink(os.path.join(checkout, "skills", "mir-backend-go"),
+                   os.path.join(sk, "mir-backend-go"))
+        linked2 = gen.install_project_skills(repo, ["mir-backend-go"], checkout)
+        check("a link already pointing inside the checkout is replaced normally",
+              linked2 == ["mir-backend-go"], str(linked2))
+
+        # a brand-new slug is linked normally: the predicate does not block absent destinations
+        os.makedirs(os.path.join(checkout, "skills", "mir-backend-python"))
+        linked3 = gen.install_project_skills(repo, ["mir-backend-python"], checkout)
+        check("installing a slug with no existing destination still links it",
+              linked3 == ["mir-backend-python"]
+              and os.path.islink(os.path.join(sk, "mir-backend-python")))
+
+        check("install_project_skills(repo, resolved) still works without repo_dir",
+              gen.install_project_skills(_repo(tmp, "proj2"), []) == [])
+
+    # -- G1 mutation: prove the _owned_by check is what spares the foreign link -------------
+    with tempfile.TemporaryDirectory() as tmp:
+        checkout = os.path.join(tmp, "checkout")
+        os.makedirs(os.path.join(checkout, "skills", "mir-frontend-react"))
+        foreign_target = os.path.join(tmp, "elsewhere", "mir-frontend-react")
+        os.makedirs(foreign_target)
+        repo = _repo(tmp)
+        sk = os.path.join(repo, ".claude", "skills")
+        os.makedirs(sk)
+        os.symlink(foreign_target, os.path.join(sk, "mir-frontend-react"))
+
+        mutant = _load_mutant(
+            tmp, "mutant_install_no_owned_by",
+            [("if os.path.islink(dst) and not _owned_by(dst, repo_dir):",
+              "if False:")])
+        linked = mutant.install_project_skills(
+            repo, ["mir-frontend", "mir-frontend-react"], checkout)
+        check("MUTATION: without the _owned_by guard, the foreign link IS clobbered",
+              "mir-frontend-react" in linked
+              and os.path.realpath(os.path.join(sk, "mir-frontend-react"))
+              == os.path.realpath(os.path.join(checkout, "skills", "mir-frontend-react")),
+              str(linked))
+
+    # -- G2: settings.local.json is inspected for a stale mir hook, never written -----------
+    with tempfile.TemporaryDirectory() as tmp:
+        repo = _repo(tmp)
+        check("absent settings.local.json: no warnings, no crash",
+              gen.local_settings_warnings(repo) == [])
+
+        good_cmd = 'python3 "$CLAUDE_PROJECT_DIR/.mir/guard.py"'
+        _write(os.path.join(repo, ".claude", "settings.local.json"), json.dumps({
+            "hooks": {"PreToolUse": [
+                {"matcher": gen.MATCHER, "_mir": gen.HOOK_TAG,
+                 "hooks": [{"type": "command", "command": good_cmd}]},
+            ]},
+        }))
+        check("present but already-correct mir hook in settings.local.json: no warnings",
+              gen.local_settings_warnings(repo) == [])
+
+        _write(os.path.join(repo, ".claude", "settings.local.json"), json.dumps({
+            "hooks": {"PreToolUse": [
+                {"matcher": "Bash", "_mir": gen.HOOK_TAG,
+                 "hooks": [{"type": "command", "command": good_cmd}]},
+            ]},
+        }))
+        warnings = gen.local_settings_warnings(repo)
+        check("a stale matcher behind the tag in settings.local.json is reported",
+              len(warnings) == 1 and "STALE" in warnings[0] and "settings.local.json" in warnings[0],
+              str(warnings))
+
+        check("settings.local.json is never written by mir_settings_warnings",
+              json.loads(_read(os.path.join(repo, ".claude", "settings.local.json")))
+              ["hooks"]["PreToolUse"][0]["matcher"] == "Bash")
+
+        # an entry with no mir tag/command at all is not mir's business
+        _write(os.path.join(repo, ".claude", "settings.local.json"), json.dumps({
+            "hooks": {"PreToolUse": [
+                {"matcher": "Bash", "hooks": [{"type": "command", "command": "echo user"}]},
+            ]},
+        }))
+        check("a non-mir hook in settings.local.json is not flagged",
+              gen.local_settings_warnings(repo) == [])
+
+        # unreadable/unparseable is reported, not raised -- mir does not own this file
+        _write(os.path.join(repo, ".claude", "settings.local.json"), "{not json")
+        warnings = gen.local_settings_warnings(repo)
+        check("an unparseable settings.local.json is reported, not a crash",
+              len(warnings) == 1 and "could not be read" in warnings[0], str(warnings))
+
+        # a full plan()/apply() run never touches settings.local.json even when it is stale
+        _write(os.path.join(repo, ".claude", "settings.local.json"), json.dumps({
+            "hooks": {"PreToolUse": [
+                {"matcher": "Bash", "_mir": gen.HOOK_TAG,
+                 "hooks": [{"type": "command", "command": good_cmd}]},
+            ]},
+        }))
+        before = _read(os.path.join(repo, ".claude", "settings.local.json"))
+        gen.apply(repo, _plan(repo))
+        check("apply() never rewrites settings.local.json",
+              _read(os.path.join(repo, ".claude", "settings.local.json")) == before)
+        check("settings.local.json is not among plan()'s write targets",
+              gen.LOCAL_SETTINGS_REL not in [it["path"] for it in _plan(repo)])

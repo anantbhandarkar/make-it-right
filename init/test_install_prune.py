@@ -43,6 +43,10 @@ def _skills_dir(home):
     return os.path.join(home, ".claude", "skills")
 
 
+def _codex_skills_dir(home):
+    return os.path.join(home, ".codex", "skills")
+
+
 def _agents_dir(home):
     return os.path.join(home, ".claude", "agents")
 
@@ -220,3 +224,162 @@ def run(check):
         r = _run(home, "--tool=claude", "--prune-only")
         check("--prune-only does not run validate.py (uninstall must work when install is broken)",
               "Validating" not in r.stdout and r.returncode == 0, r.stdout[:200])
+
+    # -- Codex: skills, not just AGENTS.md ----------------------------------------------
+    # Codex CLI reads $CODEX_HOME/skills (confirmed against codex-cli 0.147.0 with
+    # `codex debug prompt-input`, which renders the model-visible prompt: a skill linked
+    # there comes back in the "### Available skills" block, and the loader follows the
+    # symlink). Before this, --tool=codex linked ONE file and told the user to register the
+    # skills through /skills -- which only toggles skills already discovered from a root,
+    # so a skill that is on no root can never be offered there. Codex got the always-on
+    # baseline and none of the 46 skill bodies. These pin the paths so a future edit that
+    # points them somewhere unread fails here rather than in a user's session.
+    with tempfile.TemporaryDirectory() as home:
+        r = _run(home, "--tool=codex", "--scope=all")
+        check("install --tool=codex succeeds", r.returncode == 0, r.stderr[-300:])
+        codex = _codex_skills_dir(home)
+        check("codex gets every skill in $CODEX_HOME/skills, not just AGENTS.md",
+              _names(codex) == _all_skills(),
+              f"{len(_names(codex))} links vs {len(_all_skills())} skills")
+        # A link is only worth anything if it resolves; the Antigravity defect was links
+        # that existed and pointed nowhere the tool would ever look.
+        broken = [n for n in _names(codex)
+                  if not os.path.isfile(os.path.join(codex, n, "SKILL.md"))]
+        check("every codex skill link resolves to a real SKILL.md", not broken, str(broken[:5]))
+        check("codex still gets the AGENTS.md link",
+              os.path.islink(os.path.join(home, ".codex", "AGENTS.md")))
+        # $CODEX_HOME/agents is NOT written: the same probe found no flat agent directory
+        # anywhere in Codex's rendered prompt. Asserting its absence keeps a well-meant
+        # future edit from re-creating the "links nothing reads" bug.
+        check("no agents dir is invented for codex",
+              not os.path.isdir(os.path.join(home, ".codex", "agents")))
+
+    with tempfile.TemporaryDirectory() as home:
+        _run(home, "--tool=codex", "--scope=pillars")
+        codex = _codex_skills_dir(home)
+        check("--scope=pillars applies to codex too",
+              _names(codex) == _pillars(), str(_names(codex)))
+        r = _run(home, "--tool=codex", "--prune-only")
+        check("--prune removes the codex skill links",
+              _names(codex) == [], str(_names(codex)))
+        check("--prune removes the codex AGENTS.md link too",
+              not os.path.islink(os.path.join(home, ".codex", "AGENTS.md")), r.stdout[-300:])
+
+    # -- a MOVED checkout: --force-prune-path, and every guard on it ---------------------
+    # A moved (not re-cloned) checkout leaves links whose target path no longer exists.
+    # That is indistinguishable on disk from a link into a colleague's deleted checkout,
+    # so prune keeps them -- correctly, and forever. --force-prune-path is the user
+    # supplying the missing fact. Because it is a deletion root read off the command line,
+    # each guard gets its own assertion; the over-pruning direction is the dangerous one.
+    def _moved(home, old):
+        """Links in a fresh $HOME that point into `old` with this repo's layout."""
+        os.makedirs(_skills_dir(home))
+        os.makedirs(_agents_dir(home))
+        for name in ("mir-backend", "mir-frontend"):
+            os.symlink(os.path.join(old, "skills", name),
+                       os.path.join(_skills_dir(home), name))
+        os.symlink(os.path.join(old, "agents", "security-reviewer.md"),
+                   os.path.join(_agents_dir(home), "security-reviewer.md"))
+
+    with tempfile.TemporaryDirectory() as sandbox:
+        old = os.path.join(sandbox, "old-checkout")   # never created: the checkout MOVED
+
+        with tempfile.TemporaryDirectory() as home:
+            _moved(home, old)
+            r = _run(home, "--tool=claude", "--prune-only")
+            check("without the flag, a moved checkout's links are KEPT",
+                  _names(_skills_dir(home)) == ["mir-backend", "mir-frontend"],
+                  str(_names(_skills_dir(home))))
+            check("...and prune says so, naming the escape hatch instead of failing mutely",
+                  "--force-prune-path" in r.stdout, r.stdout[-400:])
+
+        with tempfile.TemporaryDirectory() as home:
+            _moved(home, old)
+            before = _snapshot(home)
+            r = _run(home, "--tool=claude", "--prune-only",
+                     "--force-prune-path=" + old)
+            check("--force-prune-path alone is DRY-RUN: nothing on disk changes",
+                  _snapshot(home) == before, str(_snapshot(home)))
+            check("...and it still prints what the confirmation would remove",
+                  "would remove" in r.stdout and "dry-run by default" in r.stdout,
+                  r.stdout[-400:])
+
+        with tempfile.TemporaryDirectory() as home:
+            _moved(home, old)
+            r = _run(home, "--tool=claude", "--prune-only",
+                     "--force-prune-path=" + old, "--confirm-force-prune")
+            check("--force-prune-path + --confirm-force-prune adopts the moved links",
+                  _names(_skills_dir(home)) == [], str(_names(_skills_dir(home))))
+            check("the moved checkout's agents link is adopted too",
+                  _names(_agents_dir(home)) == [], str(_names(_agents_dir(home))))
+
+        # A root that is not where the checkout was matches nothing: the footprint test
+        # requires the target to sit under <root>/skills or <root>/agents, this repo's own
+        # layout, so a mistyped root cannot sweep up links it never wrote.
+        with tempfile.TemporaryDirectory() as home:
+            _moved(home, old)
+            before = _snapshot(home)
+            _run(home, "--tool=claude", "--prune-only",
+                 "--force-prune-path=" + os.path.join(sandbox, "not-the-checkout"),
+                 "--confirm-force-prune")
+            check("a root with no make-it-right footprint removes nothing",
+                  _snapshot(home) == before, str(sorted(set(before) ^ set(_snapshot(home)))))
+
+        # The subtlest hole: a root that CONTAINS the install dir makes every link in that
+        # dir resolve "under" it, footprint test included -- so it must be refused, per dir.
+        with tempfile.TemporaryDirectory() as home:
+            _moved(home, old)
+            before = _snapshot(home)
+            r = _run(home, "--tool=claude", "--prune-only",
+                     "--force-prune-path=" + os.path.join(home, ".claude"),
+                     "--confirm-force-prune")
+            check("a root containing the install dir is REFUSED, not obeyed",
+                  _snapshot(home) == before and "REFUSE" in r.stderr, r.stderr[-300:])
+
+        for bad, why in (("/", "the filesystem root"),
+                         ("relative/path", "a relative path")):
+            with tempfile.TemporaryDirectory() as home:
+                _moved(home, old)
+                before = _snapshot(home)
+                r = _run(home, "--tool=claude", "--prune-only",
+                         "--force-prune-path=" + bad, "--confirm-force-prune")
+                check("--force-prune-path refuses %s, and exits nonzero" % why,
+                      r.returncode == 2 and _snapshot(home) == before, r.stderr[-200:])
+
+        # $HOME itself. Passed through the env the script actually reads, not the caller's.
+        with tempfile.TemporaryDirectory() as home:
+            _moved(home, old)
+            before = _snapshot(home)
+            r = _run(home, "--tool=claude", "--prune-only",
+                     "--force-prune-path=" + home, "--confirm-force-prune")
+            check("--force-prune-path refuses $HOME, and exits nonzero",
+                  r.returncode == 2 and _snapshot(home) == before, r.stderr[-200:])
+
+        # Without a prune mode the flag can only mislead: a plain install would print
+        # success while removing nothing, which reads as "the cleanup ran".
+        with tempfile.TemporaryDirectory() as home:
+            r = _run(home, "--tool=claude", "--force-prune-path=" + old)
+            check("--force-prune-path without --prune/--prune-only is an error",
+                  r.returncode == 2, r.stdout[-200:] + r.stderr[-200:])
+
+        # Over-pruning guard: force mode widens which TARGETS count as ours. It must not
+        # widen what may be REMOVED -- a real file or directory stays untouchable, and
+        # nothing under the supplied root is ever touched at all.
+        with tempfile.TemporaryDirectory() as home:
+            real_old = os.path.join(sandbox, "still-there")
+            os.makedirs(os.path.join(real_old, "skills", "mir-backend"))
+            keeper = os.path.join(real_old, "skills", "mir-backend", "SKILL.md")
+            with open(keeper, "w", encoding="utf-8") as fh:
+                fh.write("a real file under the root the user named\n")
+            _moved(home, real_old)
+            hand_written = os.path.join(_skills_dir(home), "mir-mine")
+            os.makedirs(hand_written)
+            _run(home, "--tool=claude", "--prune-only",
+                 "--force-prune-path=" + real_old, "--confirm-force-prune")
+            check("force-prune never removes a real directory, only symlinks",
+                  os.path.isdir(hand_written) and not os.path.islink(hand_written))
+            check("force-prune never touches anything under the root it was given",
+                  os.path.isfile(keeper))
+            check("...while still unlinking the symlinks that root explains",
+                  _names(_skills_dir(home)) == ["mir-mine"],
+                  str(_names(_skills_dir(home))))

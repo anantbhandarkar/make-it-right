@@ -29,6 +29,7 @@ sys.path.insert(0, HERE)
 import catalog  # noqa: E402
 import detect as detect_mod  # noqa: E402
 import generate as gen  # noqa: E402
+import _version  # noqa: E402
 
 
 def _stamp() -> str:
@@ -192,6 +193,14 @@ def cmd_init(args) -> int:
         print(f"  {w}")
     print()
 
+    # settings.local.json is the user's file -- conventionally gitignored, per-developer, and
+    # never checked in -- so mir reads it and never writes it. But the probe counts a
+    # mir-tagged hook in EITHER settings file as wired, so a stale matcher sitting in the
+    # local one is a silent misconfiguration: the user believes they are protected and are
+    # not. Report it loudly on every real run and change nothing.
+    for w in gen.local_settings_warnings(repo):
+        print(f"  WARN  {w}", file=sys.stderr)
+
     # 4b. optional: scope this repo's skills locally
     if args.install:
         repo_dir = os.path.dirname(HERE)
@@ -234,8 +243,39 @@ def cmd_detect(args) -> int:
     return 0
 
 
+def _version_string() -> str:
+    """`mir <version>`, augmented with `git describe` when this is a git checkout.
+
+    install.sh symlinks rather than copies, so the installed version is a property of the
+    working tree, not of a release artifact -- see docs/v2-plan.md, "mir --version and
+    install.sh --version". A bare "1.1.0" is a lie in exactly the case a bug report needs
+    the truth: a user on main, three commits past the tag, with local edits. `git describe`
+    says so; a bare VERSION read does not. Best-effort and silent on failure -- a missing or
+    broken git binary must not break --version, the same non-hard-dependency rule
+    _version.read_version() already follows for a missing VERSION file.
+    """
+    base = f"mir {_version.read_version()}"
+    try:
+        out = subprocess.run(
+            ["git", "-C", HERE, "describe", "--tags", "--always", "--dirty"],
+            capture_output=True, text=True, timeout=2,
+        )
+        if out.returncode == 0 and out.stdout.strip():
+            return f"{base} ({out.stdout.strip()})"
+    except Exception:
+        pass
+    return base
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(prog="mir", description="Make It Right project harness tools.")
+    # Placed BEFORE add_subparsers on purpose. The subparser below is `required=True`, but
+    # argparse's `version` action calls `parser.exit()` the moment it sees --version, before
+    # the required-subcommand check ever runs -- so a bare `mir --version` works despite the
+    # required subparser. That is parser ORDERING inside argparse, not a documented contract,
+    # so init/test_release.py pins it with a regression test rather than trusting it to keep
+    # working across a stdlib upgrade.
+    ap.add_argument("--version", action="version", version=_version_string())
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     p_init = sub.add_parser("init", help="prepare a repo's harness")

@@ -11,6 +11,8 @@
 #         ./install.sh --prune                remove this checkout's stale links, then install
 #         ./install.sh --prune-only           remove them and stop (the uninstall path)
 #         ./install.sh --prune --dry-run      print what prune would do, change nothing
+#         ./install.sh --prune-only --force-prune-path=<old-dir> [--confirm-force-prune]
+#                                             adopt links left by a MOVED checkout (see below)
 #         CLAUDE_HOME / CODEX_HOME / GEMINI_HOME override the target dirs.
 #
 # Why --prune exists. Installing is `ln -sfn`, which overwrites but never removes. So a
@@ -33,6 +35,16 @@
 #                       framework modules are installed per project by `mir init --install`,
 #                       which resolves exactly the ones that repo needs.
 # Claude Code merges ~/.claude/skills and <repo>/.claude/skills, so the two combine.
+#
+# Why --force-prune-path exists. Ownership is proved by resolving a link's target and
+# checking it is inside THIS checkout. If the checkout was MOVED (not re-cloned in place),
+# every old link now names a path that does not exist -- which is byte-for-byte
+# indistinguishable from "a link into a colleague's checkout that they deleted". Prune
+# refuses both, correctly, and the orphans stay forever. --force-prune-path=<old-dir> is
+# the user supplying the one fact the script cannot derive: "that path used to be me."
+# Because it means accepting a deletion root from the command line, it is fenced in by the
+# guards documented at force_prune_root() and used in prune_dir()/prune_file(); read those
+# before widening it. It is dry-run by default: --confirm-force-prune is the second key.
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -48,14 +60,19 @@ DRY_RUN=0
 WROTE=""      # newline-separated dsts written this run; used to spot links we did NOT write
 PRUNED_N=0
 KEPT_N=0
+FORCE_PATH=""       # raw --force-prune-path value; "" means "only this checkout is ours"
+FORCE_CONFIRMED=0   # --confirm-force-prune; without it, --force-prune-path is dry-run
+SAW_MOVED=0         # a KEEP whose target does not exist -- worth naming the flag once
 for arg in "$@"; do
   case "$arg" in
-    --tool=*)     TOOL="${arg#*=}" ;;
-    --tool)       shift; TOOL="${1:-claude}" ;;
-    --scope=*)    SCOPE="${arg#*=}" ;;
-    --prune)      PRUNE=1 ;;
-    --prune-only) PRUNE_ONLY=1 ;;
-    --dry-run)    DRY_RUN=1 ;;
+    --tool=*)             TOOL="${arg#*=}" ;;
+    --tool)               shift; TOOL="${1:-claude}" ;;
+    --scope=*)            SCOPE="${arg#*=}" ;;
+    --prune)              PRUNE=1 ;;
+    --prune-only)         PRUNE_ONLY=1 ;;
+    --dry-run)            DRY_RUN=1 ;;
+    --force-prune-path=*) FORCE_PATH="${arg#*=}" ;;
+    --confirm-force-prune) FORCE_CONFIRMED=1 ;;
     *) echo "unknown arg: $arg" >&2; exit 2 ;;
   esac
 done
@@ -88,17 +105,31 @@ $dst"
 # can PROVE the link is ours. Guessing once is worse than never pruning at all.
 
 resolve_path() {  # absolute, symlink-resolved path of $1 -- works when $1 does not exist
-  # Resolve the PARENT physically and keep the basename lexically. `realpath`/`readlink -f`
-  # fail outright on a dangling path, and a dangling link is precisely what we came to
-  # remove, so failing there would exempt the defect from the fix.
-  local p="$1" d b
-  d="$(dirname "$p")"; b="$(basename "$p")"
-  # If the parent cannot be entered, keep the lexical path: it will fail the ownership
+  # Resolve the deepest ANCESTOR that exists and keep the rest lexically. `realpath`/
+  # `readlink -f` fail outright on a dangling path, and a dangling link is precisely what
+  # we came to remove, so failing there would exempt the defect from the fix.
+  #
+  # Why the deepest ancestor rather than just the parent: after a checkout MOVES, a link's
+  # whole target chain below the old root is gone, so parent-only resolution leaves the
+  # target lexical (/tmp/old/skills/mir-x) while --force-prune-path=/tmp/old resolves one
+  # level and comes back physical (/private/tmp/old). Two spellings of the same directory
+  # then compare unequal and every link is kept. Both sides must normalise identically or
+  # the comparison is measuring the spelling, not the path.
+  local p="$1" d b tail
+  # The root is its own parent and its own basename, so the walk below would emit "//" for
+  # it. That spelling then fails the literal `= "/"` refusal in validate_force_path, which
+  # is the one guard whose whole job is to notice this exact argument.
+  if [ "$p" = "/" ]; then printf '/\n'; return; fi
+  d="$(dirname "$p")"; tail="/$(basename "$p")"
+  while [ "$d" != "/" ] && [ ! -d "$d" ]; do
+    b="$(basename "$d")"; d="$(dirname "$d")"; tail="/$b$tail"
+  done
+  # If the ancestor cannot be entered, keep the lexical path: it will fail the ownership
   # test below and the link is kept. Failing towards "keep" is the only safe direction.
-  if [ -d "$d" ]; then d="$(cd "$d" 2>/dev/null && pwd -P)" || d="$(dirname "$p")"; fi
+  if [ -d "$d" ]; then d="$(cd "$d" 2>/dev/null && pwd -P)" || d="$d"; fi
   case "$d" in
-    /) printf '/%s\n' "$b" ;;
-    *) printf '%s/%s\n' "$d" "$b" ;;
+    /) printf '%s\n' "$tail" ;;
+    *) printf '%s%s\n' "$d" "$tail" ;;
   esac
 }
 
@@ -117,6 +148,65 @@ under() {  # under <path> <dir> -- true when <path> is strictly INSIDE <dir>
     "$2"/?*) return 0 ;;
   esac
   return 1
+}
+
+# ── --force-prune-path: accepting a deletion root from the command line ──────────
+# FORCE_ROOT is the validated, resolved form of --force-prune-path, or "" when the flag
+# was not given. Every guard below exists because the alternative is a script that deletes
+# under $HOME from an argument, and each one blocks a specific way that goes wrong.
+FORCE_ROOT=""
+validate_force_path() {
+  [ -n "$FORCE_PATH" ] || return 0
+  # (a) Only meaningful while pruning. Silently ignoring it on a plain install would let a
+  #     typo'd invocation look like it did the cleanup the user asked for.
+  if [ "$PRUNE" != 1 ] && [ "$PRUNE_ONLY" != 1 ]; then
+    echo "--force-prune-path needs --prune or --prune-only (it only ever removes links)" >&2
+    exit 2
+  fi
+  # (b) Absolute only. A relative root would be resolved against whatever directory the
+  #     user happened to be in, so the same command would delete different things.
+  case "$FORCE_PATH" in
+    /*) ;;
+    *) echo "--force-prune-path must be an absolute path (got: $FORCE_PATH)" >&2; exit 2 ;;
+  esac
+  FORCE_ROOT="$(resolve_path "$FORCE_PATH")"
+  # (c) A root that is not a directory cannot have been a checkout. A moved checkout leaves
+  #     NOTHING there, which is fine and expected; a regular file there means a mistyped path.
+  if [ -e "$FORCE_ROOT" ] && [ ! -d "$FORCE_ROOT" ]; then
+    echo "--force-prune-path=$FORCE_ROOT exists and is not a directory" >&2; exit 2
+  fi
+  # (d) Named refusals for the two roots that would make the footprint test below vacuous
+  #     by being ancestors of everything the user owns.
+  if [ "$FORCE_ROOT" = "/" ] || [ "$FORCE_ROOT" = "$(resolve_path "$HOME")" ]; then
+    echo "--force-prune-path refuses / and \$HOME: a root that broad makes the" >&2
+    echo "footprint check meaningless. Name the actual old checkout directory." >&2
+    exit 2
+  fi
+  # (e) Dry-run unless a SECOND, separate flag is given. One mistyped path should print a
+  #     list, not perform a deletion; the confirmation is what turns the list into an act.
+  if [ "$FORCE_CONFIRMED" != 1 ]; then
+    DRY_RUN=1
+    echo "  NOTE  --force-prune-path is dry-run by default. Review the list below, then"
+    echo "        re-run with --confirm-force-prune to actually remove those links."
+  fi
+}
+
+force_root_for() {  # force_root_for <dir being pruned> -- the root to accept for THIS dir, or ""
+  # (f) The last guard, and the one that is easy to miss: if the supplied root CONTAINS the
+  #     directory being pruned, then every link in that directory resolves "under" it --
+  #     including links belonging to other checkouts -- and the footprint test collapses
+  #     into "delete everything in our namespace". Refuse per-directory, because the
+  #     directory differs per tool and per CLAUDE_HOME/CODEX_HOME/GEMINI_HOME override.
+  local rdir
+  [ -n "$FORCE_ROOT" ] || { printf '' ; return 0; }
+  rdir="$(resolve_path "$1")"
+  if [ "$rdir" = "$FORCE_ROOT" ] || under "$rdir" "$FORCE_ROOT"; then
+    echo "  REFUSE --force-prune-path=$FORCE_ROOT contains $1 — a root that contains the" >&2
+    echo "         install directory would match every link in it, not just ours." >&2
+    printf ''
+    return 0
+  fi
+  printf '%s\n' "$FORCE_ROOT"
 }
 
 name_matches() {  # name_matches <path> <skills|agents> -- does the basename look like ours?
@@ -138,20 +228,35 @@ owned() {  # owned <path> <skills|agents> -- quiet form of the full test
   return 0
 }
 
-remove_link() {  # remove_link <link> <resolved target> -- honours --dry-run
+remove_link() {  # remove_link <link> <resolved target> [note] -- honours --dry-run
+  local note="${3:-}"
   if [ "$DRY_RUN" = 1 ]; then
-    echo "  DRY   would remove $1 -> $2"
+    echo "  DRY   would remove $1 -> $2$note"
   else
     rm -f -- "$1"   # $1 is known to be a symlink, so this unlinks it, never its target
-    echo "  PRUNE $1"
+    echo "  PRUNE $1$note"
   fi
   PRUNED_N=$((PRUNED_N + 1))
 }
 
+keep_link() {  # keep_link <link> <resolved target> -- the refusal, plus why it happened
+  if [ -e "$2" ]; then
+    echo "  KEEP  $1 -> $2 (not this checkout — remove it yourself if you want it gone)"
+  else
+    # The moved-checkout case. Nothing on disk can distinguish "this checkout, before it
+    # moved" from "someone else's checkout, since deleted", so keeping is still correct --
+    # but the user knows which it is, and --force-prune-path is how they say so.
+    echo "  KEEP  $1 -> $2 (target does not exist — another checkout, or this one before it moved)"
+    SAW_MOVED=1
+  fi
+  KEPT_N=$((KEPT_N + 1))
+}
+
 prune_dir() {  # prune_dir <dir> <skills|agents>
-  local dir="$1" sub="$2" entry target
+  local dir="$1" sub="$2" entry target force
   if [ "$PRUNE" != 1 ] && [ "$PRUNE_ONLY" != 1 ]; then return 0; fi
   [ -d "$dir" ] || return 0
+  force="$(force_root_for "$dir")"
   for entry in "$dir"/*; do
     # -e is false for a dangling symlink, so -L has to be asked separately; this also
     # skips the un-expanded glob when the directory is empty.
@@ -159,33 +264,48 @@ prune_dir() {  # prune_dir <dir> <skills|agents>
     # Anything not in our namespace is somebody else's file. Say nothing about it.
     name_matches "$entry" "$sub" || continue
     if [ ! -L "$entry" ]; then
+      # Unconditional, and deliberately ABOVE the force branch: --force-prune-path widens
+      # which TARGETS count as ours, never what may be removed. A real file or directory
+      # is never removable by any flag, because unlinking is recoverable and rm -r is not.
       echo "  KEEP  $entry (a real file or directory — prune only ever unlinks symlinks)"
       KEPT_N=$((KEPT_N + 1))
       continue
     fi
     target="$(resolve_path "$(link_target "$entry")")"
-    if ! under "$target" "$REPO_REAL/$sub"; then
+    if under "$target" "$REPO_REAL/$sub"; then
+      remove_link "$entry" "$target"
+    elif [ -n "$force" ] && under "$target" "$force/$sub"; then
+      # The footprint test. Two conditions had to hold to get here: the basename is in our
+      # namespace (name_matches, above) AND the target sits under <old>/skills or
+      # <old>/agents -- this repo's own directory layout. A user who mistypes the root at
+      # some unrelated directory matches nothing, because nothing links into <that>/skills.
+      remove_link "$entry" "$target" "  (via --force-prune-path=$force)"
+    else
       # A mir-* link into a DIFFERENT checkout is another setup's, and a link into a
       # path that no longer exists cannot be told apart from one. Refuse either way.
-      echo "  KEEP  $entry -> $target (not this checkout — remove it yourself if you want it gone)"
-      KEPT_N=$((KEPT_N + 1))
-      continue
+      keep_link "$entry" "$target"
     fi
-    remove_link "$entry" "$target"
   done
 }
 
 prune_file() {  # prune_file <link> <repo-relative source> -- one named link, e.g. AGENTS.md
-  local dst="$1" src="$REPO_REAL/$2" target
+  local dst="$1" src="$REPO_REAL/$2" target force
   if [ "$PRUNE" != 1 ] && [ "$PRUNE_ONLY" != 1 ]; then return 0; fi
   [ -L "$dst" ] || return 0          # absent, or a real file the user wrote: leave it
   target="$(resolve_path "$(link_target "$dst")")"
-  if [ "$target" != "$src" ]; then
-    echo "  KEEP  $dst -> $target (not this checkout)"
-    KEPT_N=$((KEPT_N + 1))
+  if [ "$target" = "$src" ]; then
+    remove_link "$dst" "$target"
     return 0
   fi
-  remove_link "$dst" "$target"
+  # A moved checkout orphans this link exactly as it orphans the skill links, so the same
+  # opt-in applies. Equality, not `under`: this is one named file, so widening to a prefix
+  # test would accept <old>/AGENTS.md.backup and anything else sharing the prefix.
+  force="$(force_root_for "$(dirname "$dst")")"
+  if [ -n "$force" ] && [ "$target" = "$force/$2" ]; then
+    remove_link "$dst" "$target" "  (via --force-prune-path=$force)"
+    return 0
+  fi
+  keep_link "$dst" "$target"
 }
 
 warn_stale() {  # warn_stale <dir> <skills|agents> -- detect, on a normal install, what prune would find
@@ -279,15 +399,36 @@ install_cursor() {
   echo "        copy AGENTS.md into a project root (Cursor reads AGENTS.md natively)."
 }
 
-# ── Codex CLI: AGENTS.md is the always-on, documented surface ────────────────────
+# ── Codex CLI: $CODEX_HOME/skills is a real discovery root, plus AGENTS.md ───────
 install_codex() {
   local base="${CODEX_HOME:-$HOME/.codex}"
   echo "→ Codex CLI  ($base)"
+  # Skills go in $CODEX_HOME/skills. Verified against codex-cli 0.147.0 rather than assumed:
+  # `codex debug prompt-input` renders the model-visible prompt, and a probe skill planted
+  # there comes back in the "## Skills / ### Available skills" block with a `file:` locator
+  # naming the path we wrote. The same probe confirmed Codex's loader FOLLOWS a symlinked
+  # skill directory, which is what makes the link() idiom usable here at all. It is also
+  # the path Codex's own bundled `skill-installer` skill documents: "Installs into
+  # `$CODEX_HOME/skills/<skill-name>` (defaults to `~/.codex/skills`)". The earlier
+  # instruction to "register these through /skills" was wrong: /skills only toggles skills
+  # that have ALREADY been discovered from a root, so a skill that is nowhere on disk under
+  # a root can never appear there to be selected.
+  prune_dir "$base/skills" skills
   prune_file "$base/AGENTS.md" AGENTS.md
   if [ "$PRUNE_ONLY" = 1 ]; then return 0; fi
+  install_skills_to "$base/skills"
   link "$REPO_DIR/AGENTS.md" "$base/AGENTS.md"
-  echo "  NOTE  AGENTS.md loads automatically. To wire the skills/sub-agents natively,"
-  echo "        register them via Codex '/skills' and custom-agent config (see Codex docs)."
+  warn_stale "$base/skills" skills
+  # No agents/ install, and that is a finding rather than an omission. The same probe
+  # planted agent .md files in $CODEX_HOME/agents, $HOME/.agents/agents, <repo>/.agents/agents
+  # and <repo>/.codex/agents; none appeared anywhere in the rendered prompt. Codex's
+  # per-skill `agents/openai.yaml` (see its bundled skills) carries display metadata --
+  # display_name, short_description, icons -- not a reviewer sub-agent definition. So there
+  # is no Codex equivalent of ~/.claude/agents to link into, and inventing one would repeat
+  # the Antigravity defect: links in a directory nothing reads.
+  echo "  NOTE  Skills load on-demand by description from $base/skills; AGENTS.md is always on."
+  echo "        Codex has no directory for standalone reviewer agents — the reviewers run"
+  echo "        inline per the AGENTS.md pipeline (their checklists ship inside the skills)."
 }
 
 # ── Antigravity: SKILL.md skills + cross-tool AGENTS.md, both global ──────────────
@@ -318,6 +459,8 @@ install_antigravity() {
   echo "        AGENTS.md pipeline (their checklists ship inside the mir-backend skill)."
 }
 
+validate_force_path   # after resolve_path/under exist, before anything is removed
+
 if [ "$PRUNE_ONLY" = 1 ]; then
   # Uninstalling must work on a tree that no longer validates -- otherwise the one command
   # that removes a broken install is gated on the install not being broken.
@@ -343,6 +486,15 @@ if [ "$PRUNE" = 1 ] || [ "$PRUNE_ONLY" = 1 ]; then
     echo "Dry run: $PRUNED_N link(s) would be removed, $KEPT_N kept. Nothing on disk changed."
   else
     echo "Pruned $PRUNED_N link(s); kept $KEPT_N that this checkout could not prove it owns."
+  fi
+  # Said once, not once per link: a moved checkout orphans every link at the same time, so
+  # the per-link KEEP lines would otherwise repeat the same advice 46 times.
+  if [ "$SAW_MOVED" = 1 ] && [ -z "$FORCE_ROOT" ]; then
+    echo
+    echo "Some kept links point at a path that no longer exists. If that path was THIS"
+    echo "checkout before you moved it, adopt those links with:"
+    echo "  ./install.sh --prune-only --force-prune-path=<that old directory>"
+    echo "That prints a list and changes nothing; add --confirm-force-prune to remove them."
   fi
 fi
 

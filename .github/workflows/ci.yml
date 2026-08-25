@@ -1,0 +1,235 @@
+name: CI
+
+# Windows is excluded from every job here, deliberately, not by omission: install.sh is
+# bash, generate.py registers the PreToolUse hook as bare `python3` (see D5 in
+# docs/v2-plan.md), and install_project_skills()/install.sh both use symlinks
+# (os.symlink / ln -sfn), which need Developer Mode or elevation on Windows. None of that
+# is a quick fix, so this workflow tests what the tool actually promises to support.
+#
+# No step in this file interpolates untrusted event data (issue/PR titles or bodies, commit
+# messages, branch names) into a `run:` shell command -- every `${{ ... }}` used below reads
+# a job-controlled value (matrix.os, matrix.python-version, a pinned action SHA), not
+# attacker-controlled text, so there is no template-injection surface here to route through
+# an env: var instead.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Least privilege: every job here only reads the repo and writes CI artifacts/logs.
+permissions:
+  contents: read
+
+jobs:
+  # -- validate: the tree itself, before anything else runs against it -------------------
+  validate:
+    name: validate.py (errors hard, warnings ratcheted)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+      - name: Run validate.py --quiet (the same gate install.sh runs before installing)
+        run: python3 validate.py --quiet
+      - name: Assert errors == 0 (hard) and warnings <= 7 (ratchet)
+        run: |
+          python3 validate.py --json > validate-report.json
+          python3 - <<'PY'
+          import json, sys
+
+          d = json.load(open("validate-report.json"))
+          stats = d["stats"]
+          errors, warnings = stats["errors"], stats["warnings"]
+          print(f"{errors} errors, {warnings} warnings")
+
+          # errors == 0 is a hard gate -- install.sh already refuses to install on any
+          # error, so a validate job that let one through would be weaker than the
+          # installer it is supposed to be gating in front of.
+          if errors:
+              print("::error::validate.py found errors -- see the job log above", file=sys.stderr)
+              sys.exit(1)
+
+          # warnings <= 7 is a RATCHET, not a rule. The 7 warnings at the time this CI was
+          # written are 4x CTX001 (four skill bodies 3-8 lines over the 380-line budget)
+          # and 3x REF002 (.mir-planned references, working as designed -- see
+          # docs/v2-plan.md, "Should warnings fail the build?"). validate.py has no
+          # --max-warnings flag of its own (it is owned by a different workstream in this
+          # release), so the ratchet is asserted here instead of inside the tool. This
+          # catches the count growing; it does NOT catch a trimmed CTX001 being swapped for
+          # a fresh warning under the same total -- see docs/v2-plan.md's "Residual hole
+          # worth naming and not fixing" for why that's an accepted, named gap rather than
+          # a silent one.
+          BUDGET = 7
+          if warnings > BUDGET:
+              print(f"::error::warning count {warnings} exceeds the ratchet of {BUDGET}. "
+                    "If the new warning is deliberate (a new .mir-planned entry, a skill "
+                    "that legitimately needs the extra lines), raise BUDGET here in the "
+                    "same commit and say why.", file=sys.stderr)
+              sys.exit(1)
+          PY
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: validate-report
+          path: validate-report.json
+          retention-days: 14
+
+  # -- test: init/test_init.py across the floor and the ceiling, on both supported OSes --
+  test:
+    name: test (${{ matrix.os }}, py${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            python-version: "3.9"
+          - os: ubuntu-latest
+            python-version: "3.13"
+          # macos-13 is the last Intel (x86_64) GitHub-hosted macOS image. CPython 3.9's
+          # earliest macOS builds predate Apple Silicon's universal2 installers, so pinning
+          # the 3.9 leg to an Intel runner is the safer match for "the floor" rather than
+          # trusting every 3.9.x patch release to have a well-tested arm64 build in the
+          # actions/python-versions manifest that setup-python reads from.
+          - os: macos-13
+            python-version: "3.9"
+          - os: macos-latest
+            python-version: "3.13"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: python3 init/test_init.py (stdlib only -- no pyyaml on this leg)
+        run: python3 init/test_init.py
+
+  # -- test-with-pyyaml: the same suite, with the optional pyyaml path exercised ---------
+  # init/test_init.py's description-length check parses SKILL.md frontmatter with pyyaml
+  # when it is importable and falls back to a regex otherwise (see the _desc() docstring in
+  # test_init.py -- the regex path has shipped a real measurement bug before: a greedy
+  # DOTALL match ran past the description's closing quote and inflated every count by
+  # 50-95 chars). Both code paths need their own green run, not just the fallback one the
+  # bare `test` job above exercises by omission.
+  test-with-pyyaml:
+    name: test (pyyaml present)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+      - run: pip install pyyaml
+      - run: python3 -c "import yaml; print('pyyaml', yaml.__version__)"
+      - run: python3 init/test_init.py
+
+  # -- install-smoke: install.sh into a throwaway HOME, on both supported OSes -----------
+  install-smoke:
+    name: install.sh smoke (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+      - name: Install into throwaway CLAUDE_HOME / CODEX_HOME / GEMINI_HOME
+        run: |
+          set -euo pipefail
+          export CLAUDE_HOME="$RUNNER_TEMP/home-claude"
+          export CODEX_HOME="$RUNNER_TEMP/home-codex"
+          export GEMINI_HOME="$RUNNER_TEMP/home-gemini"
+          ./install.sh --tool=all
+
+          # Spot-check the install actually landed where the tool documents it should,
+          # rather than trusting a zero exit code alone -- a silently-empty skills
+          # directory would still exit 0.
+          test -L "$CLAUDE_HOME/skills/mir-backend"
+          test -L "$CLAUDE_HOME/agents/security-reviewer.md"
+          test -L "$CODEX_HOME/AGENTS.md"
+          test -L "$GEMINI_HOME/config/skills/mir-backend"
+          test -L "$GEMINI_HOME/AGENTS.md"
+          # The legacy Antigravity 2.0 path must NOT be installed into (see D6 /
+          # 493b04b in docs/v2-plan.md and CHANGELOG.md) -- it must stay absent, not
+          # merely unwritten-to by this run.
+          test ! -e "$GEMINI_HOME/antigravity/skills/mir-backend"
+
+          n_claude=$(find "$CLAUDE_HOME/skills" -maxdepth 1 -name 'mir-*' | wc -l)
+          echo "linked $n_claude mir-* skills into \$CLAUDE_HOME/skills"
+          test "$n_claude" -gt 40   # --scope=all is the install.sh default: expect ~46
+      - name: --scope=pillars installs the floor only
+        run: |
+          set -euo pipefail
+          export CLAUDE_HOME="$RUNNER_TEMP/home-pillars"
+          ./install.sh --tool=claude --scope=pillars
+          n=$(find "$CLAUDE_HOME/skills" -maxdepth 1 -name 'mir-*' | wc -l)
+          echo "linked $n pillar(s)"
+          test "$n" -eq 7   # 7 pillars at the time this workflow was written
+      - name: --prune-only --dry-run changes nothing on disk
+        run: |
+          set -euo pipefail
+          export CLAUDE_HOME="$RUNNER_TEMP/home-claude"
+          before="$(find "$CLAUDE_HOME" -type l | sort)"
+          ./install.sh --tool=claude --prune-only --dry-run
+          after="$(find "$CLAUDE_HOME" -type l | sort)"
+          test "$before" = "$after"
+      - name: --prune-only actually removes this checkout's links
+        run: |
+          set -euo pipefail
+          export CLAUDE_HOME="$RUNNER_TEMP/home-claude"
+          ./install.sh --tool=claude --prune-only
+          test ! -e "$CLAUDE_HOME/skills/mir-backend"
+
+  # -- init-e2e: the whole detect -> confirm -> resolve -> generate -> verify loop -------
+  init-e2e:
+    name: mir init end-to-end
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+      - name: Build a throwaway single-framework repo and run mir init against it
+        run: |
+          set -euo pipefail
+          proj="$RUNNER_TEMP/init-e2e-proj"
+          mkdir -p "$proj"
+          # A single, unambiguous frontend framework: detect.py must not hit the
+          # undecided-input refusal path (see CHANGELOG.md 1.1.0, the CLI-refuses-ambiguity
+          # fix) or this job would be testing that refusal instead of the happy path.
+          cat > "$proj/package.json" <<'JSON'
+          {"name": "init-e2e-fixture", "dependencies": {"react": "19.0.0"}}
+          JSON
+
+          python3 init/cli.py init "$proj"
+          echo "mir init exit: $?"
+
+          test -f "$proj/.mir/manifest.json"
+          test -f "$proj/.mir/guard.py"
+          test -f "$proj/.mir/probe.py"
+          test -f "$proj/.claude/settings.json"
+          test -f "$proj/AGENTS.md"
+          grep -q '"mir_manifest_version": 1' "$proj/.mir/manifest.json"
+      - name: mir init --install links this repo's resolved tiers/modules locally
+        run: |
+          set -euo pipefail
+          proj="$RUNNER_TEMP/init-e2e-proj"
+          python3 init/cli.py init "$proj" --install
+          test -L "$proj/.claude/skills/mir-frontend-react"
+          # Only tiers/modules are linked locally -- pillars are the global floor and
+          # would be shadowed. See init/test_init.py, "progressive install".
+          test ! -e "$proj/.claude/skills/mir-frontend"
+      - name: --dry-run writes nothing
+        run: |
+          set -euo pipefail
+          proj="$RUNNER_TEMP/init-e2e-dry"
+          mkdir -p "$proj"
+          cp "$RUNNER_TEMP/init-e2e-proj/package.json" "$proj/package.json"
+          python3 init/cli.py init "$proj" --dry-run
+          test ! -e "$proj/.mir"
+          test ! -e "$proj/AGENTS.md"

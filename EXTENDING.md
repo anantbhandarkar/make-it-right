@@ -13,7 +13,7 @@ Every host (Claude Code, Cursor, Codex, Antigravity) uses **progressive disclosu
 | 2 — skill body | one `SKILL.md`, in full | ~1–3k tokens | **only when its description matches the task** |
 | 3 — references | `references/*.md` | as big as needed | **only when the SKILL.md says "read X"** |
 
-So a session that's "build a FastAPI endpoint" loads `mir-backend` + `mir-backend-python` + `mir-backend-python-fastapi` and **nothing else** — not `mir-frontend`, not `mir-mobile`, not `mir-database`, not the React or Postgres modules. Their *descriptions* don't match, so their *bodies* never load. Going from 31 skills to 45 cost that session nothing but the extra Tier 1 descriptions. The whole design rests on two rules below.
+So a session that's "build a FastAPI endpoint" loads `mir-backend` + `mir-backend-python` + `mir-backend-python-fastapi` and **nothing else** — not `mir-frontend`, not `mir-mobile`, not `mir-database`, not the React or Postgres modules. Their *descriptions* don't match, so their *bodies* never load. Going from 31 skills to 46 cost that session nothing but the extra Tier 1 descriptions. The whole design rests on two rules below.
 
 ## Rule 1 — the description is the router
 
@@ -38,7 +38,7 @@ If two reasonable stacks would load the same module, the SKIP line is too weak �
 
 The **backend pillar has three tiers** (generic → runtime → framework), because runtime concerns (GIL, event loop, GC) are shared across every framework on that runtime. The **frontend pillar** is also three-tier, but its middle tier is the **reactivity library**, not a runtime. Other pillars are two-tier until a middle layer earns its place. **Tool is an orthogonal axis handled by the installer, never by content.**
 
-What exists today — 45 skills: 6 pillars, 13 middle tiers, 26 leaf modules.
+What exists today — 46 skills: 7 pillars, 17 tiers, 22 modules. Those last three figures are `validate.py`'s hyphen-count classification, not a count of the matrix rows below: a two-tier pillar's direct leaf (`mir-database-postgres`, `mir-mobile-ios`) has two hyphens, so the validator counts it as a tier, not a module — see "Validating the tree" below.
 
 ```
 pillar      generic          middle tier                     leaf module
@@ -95,7 +95,7 @@ skills/
   mir-backend-python/                # runtime tier — CPython concerns, all Python frameworks
   mir-backend-python-fastapi/        # framework module (chains: backend → python → fastapi)
     SKILL.md  references/
-  mir-frontend/ mir-mobile/ mir-database/ mir-cloud/ mir-devsecops/   # the other five pillars
+  mir-frontend/ mir-mobile/ mir-database/ mir-cloud/ mir-devsecops/ mir-init/   # the other six pillars
 agents/                              # shared reviewers, reused by every tier/pillar
   constraint-interrogator.md  reliability-reviewer.md  security-reviewer.md  migration-reviewer.md
   a11y-reviewer.md  frontend-perf-reviewer.md
@@ -169,6 +169,6 @@ The summary line classifies by hyphen count, so a two-tier pillar's leaf (`mir-d
 
 - Tier 0: `AGENTS.md` (always).
 - Tier 1: all `mir-*` descriptions visible (~a few hundred tokens total).
-- Tier 2: three skills load — `mir-backend` (matches "backend, state-changing, money"), `mir-backend-python` (Python runtime), and `mir-backend-python-fastapi` (FastAPI endpoint). The other 42 do **not** — `mir-backend-node`, `mir-frontend*`, `mir-mobile*`, `mir-database*` and the rest are excluded by their SKIP lines.
+- Tier 2: three skills load — `mir-backend` (matches "backend, state-changing, money"), `mir-backend-python` (Python runtime), and `mir-backend-python-fastapi` (FastAPI endpoint). The other 43 do **not** — `mir-backend-node`, `mir-frontend*`, `mir-mobile*`, `mir-database*`, `mir-init`, and the rest are excluded by their SKIP lines.
 - Tier 3: at Gate 1, `mir-backend/references/constraint-catalog.md` loads; at Gate 6, `mir-backend-python-fastapi/references/fastapi-gotchas.md`; the failure-mode catalog only if Gate 3 needs it.
 - Tool axis: because you installed `--tool=cursor`, the same files are read from `~/.claude`; the question UI degrades to plain text. No content branched.

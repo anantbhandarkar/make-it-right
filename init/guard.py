@@ -42,12 +42,26 @@ stop a tool call and feed the reason back to the model.
 Coverage, stated honestly because both plan reviewers demanded it:
   - Write / Edit / MultiEdit / NotebookEdit: the file path is a structured field; fully covered.
   - Bash: the write target is inside a shell string. The guard splits the command into
-    segments on `;`, `&&`, `||`, `|` and newline, tokenises each, and reads the destinations
-    per verb (`>`, `>>`, `tee`, `dd of=`, `cp`, `mv`, `install`); whole-string regexes run
-    too and their results are unioned in, so nothing that blocked before stops blocking. A
-    shell can still hide a write in ways no parser here will see (eval, a script, a heredoc
-    to a variable path). Bash write coverage is PARTIAL and is reported as such; do not read
-    a clean Bash result as proof.
+    segments on `;`, `&&`, `||`, `|`, a background `&` and newline, tokenises each, and reads
+    the destinations per verb (`>`, `>>`, `&>f`, `>&f`, `tee`, `dd of=`, and `cp`/`mv`/
+    `install` including `-t DIR` and the per-source path each operand of a multi-source copy
+    lands on); whole-string regexes run too and their results are unioned in, so nothing that
+    blocked before stops blocking. Bash write coverage is PARTIAL and is reported as such; do
+    not read a clean Bash result as proof. Named, because a limitation nobody wrote down is
+    indistinguishable from one nobody found -- what this parser still does NOT see:
+      * indirection: `eval`, `bash -c`, a script file, a path in `$VAR` or `$(...)`, a
+        heredoc whose target is computed. The guard reads tokens, and none of these carry
+        the path as a token.
+      * `cp a b` where `b` is an existing DIRECTORY: the write is `b/a`, and the guard names
+        only `b`. Multi-source (`cp a b dir/`) and a trailing `/` are read as directories
+        because the syntax says so; the two-operand form does not, and deciding it means
+        stat-ing a path the command has not created yet.
+      * verbs that write a file they do not name as a destination operand: `sed -i`,
+        `tar -x`, `git checkout`, `python -c`, an editor, any compiler's `-o`-less default.
+        Each would need its own flag grammar, and a wrong one over-blocks rather than fails
+        quietly, so they are listed rather than guessed at.
+      * a shell function, alias, or `$PATH` shadow that renames a verb: `tee` is read as tee
+        by its name, and a name is not a promise.
   - Everything else (MCP tool writes, apply_patch, specialized tools): NOT covered here.
 
 The guard fails OPEN on its own errors (missing manifest, bad JSON) rather than blocking all
@@ -82,6 +96,24 @@ BLOCK = 2
 GUARD_MANIFEST_VERSION = 1
 
 # Tools whose write target is a clean structured field.
+#
+# `Update` is KEPT DELIBERATELY, and this is the note that exists so the next person does not
+# re-open it. It could not be found as a live tool: it is absent from the Claude Code tools
+# reference, and a scan of local session transcripts shows zero events with tool_name
+# "Update" (the near miss is `TaskUpdate`, which edits a task, not a file). MCP tools arrive
+# namespaced as `mcp__server__tool`, so a bare `Update` cannot come from one either.
+#
+# It stays because the two failure directions are not symmetric. A key for a tool that never
+# fires costs one never-taken alternative in the hook matcher and one always-passing row in
+# the probe's wiring table -- it widens the matcher and denies nothing. A MISSING key for a
+# tool that does fire is the worst shape in this codebase: targets_from_event returns
+# ([], fully_covered=True), so the write is allowed unread AND reported as fully covered.
+# Cheap insurance against a rename beats tidiness on a frozen file that is copied into user
+# repos and only refreshed by `mir init`.
+#
+# If a later reader does remove it, four other places name it and go stale together:
+# generate.MATCHER, test_verify.GOOD_MATCHER, probe._FALLBACK_PATH_FIELD_TOOLS, and the
+# coverage table in README.md.
 PATH_FIELD_TOOLS = {
     "Write": "file_path",
     "Edit": "file_path",
@@ -105,19 +137,28 @@ _SHELL_WRITE_PATTERNS = [
 
 # Where one command ends and the next begins. `&&` and `||` fall out of splitting on the
 # single characters, and an empty segment is dropped, so the two-character operators need no
-# case of their own.
+# case of their own. `&` is the exception and is handled in split_segments: it separates as
+# `&&` and as a trailing background `&`, but in `2>&1`, `>&2` and `&>log` it is one half of a
+# redirection operator and splitting there invents a command out of a file descriptor.
 _SEGMENT_OPS = ";|&\n"
 
-# A redirection token: `>f`, `>> f`, `2>f`, `&>f`, `>|f`. The capture is empty when the
-# filename is a separate token, which is the ordinary `> f` spelling.
+# A redirection token: `>f`, `>> f`, `2>f`, `&>f`, `>|f`, `2>&1`, `>&f`. The capture is empty
+# when the filename is a separate token, which is the ordinary `> f` spelling.
 _REDIR_TOKEN = re.compile(r"^(?:\d+|&)?>{1,2}\|?(.*)$")
 
 # Wrappers that stand in front of the real verb. Stripping them keeps `sudo tee x` readable
 # without pretending this is a shell.
 _COMMAND_PREFIXES = {"sudo", "command", "nohup", "time", "env", "exec"}
 
-# Verbs whose destination is the last positional operand.
-_DEST_LAST_VERBS = {"cp", "mv", "install"}
+# Verbs that copy operands to a destination. The destination is the last positional operand
+# UNLESS `-t`/`--target-directory` names it, which inverts the order.
+_COPY_VERBS = {"cp", "mv", "install"}
+
+# Short options of those verbs that swallow the NEXT token. Without this list `install -m 644
+# a dir/` reads `644` as a source and invents a write to `dir/644`. Only the arg-taking
+# options of cp/mv/install are listed; a flag wrongly listed here eats a real operand, so the
+# set stays small and boring: -t/--target-directory, -m mode, -o owner, -g group, -S suffix.
+_COPY_OPTS_WITH_ARG = {"-t", "-m", "-o", "-g", "-S"}
 
 _ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z_0-9]*=")
 
@@ -128,12 +169,21 @@ def split_segments(cmd: str) -> list[str]:
     Quotes are tracked so an operator inside `"a;b"` is not a split point; a write hidden in
     a quoted string is not the attack this guards against, but splitting there would corrupt
     the surrounding tokens and lose a real target.
+
+    `&` is decided by its neighbours, because the same character is a separator in `cmd &`
+    and in `a && b` but part of one operator in `2>&1`, `>&2`, `>&file` and `&>file`. A `&`
+    welded to a `>` on either side stays in the segment; every other `&` splits, which keeps
+    `&&` splitting (its second `&` is followed by a space, not a `>`) and leaves the empty
+    segment between them to be dropped.
     """
     segments: list[str] = []
     cur: list[str] = []
     quote = None
     escaped = False
-    for ch in cmd:
+    i = 0
+    while i < len(cmd):
+        ch = cmd[i]
+        i += 1
         if escaped:
             cur.append(ch)
             escaped = False
@@ -152,6 +202,9 @@ def split_segments(cmd: str) -> list[str]:
             cur.append(ch)
             continue
         if ch in _SEGMENT_OPS:
+            if ch == "&" and ((cur and cur[-1] == ">") or cmd[i:i + 1] == ">"):
+                cur.append(ch)   # `2>&1`, `>&2`, `&>log`: one operator, not two commands
+                continue
             segments.append("".join(cur))
             cur = []
             continue
@@ -170,6 +223,26 @@ def _tokens(segment: str) -> list[str]:
         return segment.split()
 
 
+def _redirect_dest(rest: str, toks: list[str], i: int):
+    """(file written by one redirection, index of its last token). "" when it writes no file.
+
+    `>&` is the fork. After it, a bare number or `-` is a file DESCRIPTOR -- `2>&1` duplicates
+    stderr onto stdout and opens nothing -- but any other word is a FILE, because bash reads
+    `>&word` as "send both streams to word". Dropping every `&` form, which is what "does it
+    start with & ?" did, is exactly what let `echo x >&.git/config` through.
+    """
+    dup = False
+    if not rest or rest == "&":
+        dup = rest == "&"
+        i += 1                                     # `> f` / `>& f`: filename is its own token
+        rest = toks[i] if i < len(toks) else ""
+    elif rest.startswith("&"):
+        dup, rest = True, rest[1:]
+    if dup and (rest == "-" or rest.isdigit()):
+        return "", i
+    return rest, i
+
+
 def segment_targets(segment: str) -> list[str]:
     """Write destinations named by one command: its redirections plus its verb's target."""
     toks = _tokens(segment)
@@ -179,12 +252,8 @@ def segment_targets(segment: str) -> list[str]:
     while i < len(toks):
         m = _REDIR_TOKEN.match(toks[i])
         if m:
-            dest = m.group(1)
-            if not dest:
-                i += 1
-                dest = toks[i] if i < len(toks) else ""
-            # `2>&1` and `>&2` redirect to a descriptor, not to a file called `&1`.
-            if dest and not dest.startswith("&"):
+            dest, i = _redirect_dest(m.group(1), toks, i)
+            if dest:
                 out.append(dest)
             i += 1
             continue
@@ -205,12 +274,105 @@ def segment_targets(segment: str) -> list[str]:
         out += [a for a in args if not a.startswith("-")]
     elif verb == "dd":
         out += [a[3:] for a in args if a.startswith("of=") and len(a) > 3]
-    elif verb in _DEST_LAST_VERBS:
-        positional = [a for a in args if not a.startswith("-")]
-        # Two operands minimum, so a lone `cp --help`-shaped call names no destination.
-        if len(positional) >= 2:
-            out.append(positional[-1])
+    elif verb in _COPY_VERBS:
+        out += copy_dests(args)
     return out
+
+
+def _copy_operands(args: list[str]):
+    """(sources, target directory or None) for a cp/mv/install argument list.
+
+    Options are walked rather than filtered out, because an option's ARGUMENT is not an
+    operand: `install -m 644 a dir/` has one source, not two. Clusters and attached values
+    (`-tDIR`, `-m644`, `-rt DIR`) are handled in the same pass, since a missed `-t` puts the
+    destination back at the end of the list where it is not.
+
+    `--target-directory` is the only long option read, because it is the only one that moves
+    the destination. A long option given its value as a SEPARATE token (`--suffix bak`) leaves
+    that value counted as a source, which can only add a destination that is not written --
+    over-blocking, never under -- so it is not worth a table of every option's arity.
+    """
+    sources: list[str] = []
+    target_dir = None
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == "--":                                  # everything after is an operand
+            sources += args[i + 1:]
+            break
+        if a.startswith("--"):
+            name, eq, val = a.partition("=")
+            if name == "--target-directory":
+                if not eq:
+                    i += 1
+                    val = args[i] if i < len(args) else ""
+                target_dir = val
+            i += 1
+            continue
+        if a.startswith("-") and a != "-":
+            for pos, letter in enumerate(a[1:]):
+                if "-" + letter not in _COPY_OPTS_WITH_ARG:
+                    continue
+                val = a[pos + 2:]
+                if not val:
+                    i += 1
+                    val = args[i] if i < len(args) else ""
+                if letter == "t":
+                    target_dir = val
+                break
+            i += 1
+            continue
+        sources.append(a)
+        i += 1
+    return sources, target_dir
+
+
+def _looks_like_dir(dest: str) -> bool:
+    # Only what the SYNTAX settles. `cp a b` where b is an existing directory also writes
+    # `b/a`, but reading that off the filesystem means stat-ing a path the command has not
+    # created yet, so it is a documented limitation instead of a guess.
+    return dest.endswith("/") or os.path.basename(dest) in (".", "..")
+
+
+def copy_dests(args: list[str]) -> list[str]:
+    """Every path a cp/mv/install invocation writes.
+
+    `cp a b dir/` writes `dir/a` and `dir/b`, not `dir`. Naming only the last operand still
+    blocks a denied DIRECTORY, because that blocks by prefix -- but it misses a denied GLOB,
+    and "at any depth, by filename" is the only shape a secrets rule has, so `cp .env.local
+    allowed/` slipped past a `**/.env*` entry that exists to stop exactly that.
+    """
+    # The floor: exactly what the pre-fix parser named -- the last operand that does not look
+    # like a flag. Recomputed rather than replaced, so no command that blocks today stops
+    # blocking even where the parse below reads the command more correctly. `cp -t src X`
+    # copies X INTO src, so X is a source and reporting it is wrong; it is reported anyway,
+    # because over-reporting a source can only over-block, and quietly un-blocking a path is
+    # the one direction this file may not move.
+    dests: list[str] = []
+    legacy = [a for a in args if not a.startswith("-")]
+    if len(legacy) >= 2:
+        dests.append(legacy[-1])
+
+    sources, target_dir = _copy_operands(args)
+    if target_dir is not None:
+        # `-t` says "directory" in so many words, so one source is enough: `cp -t build a`
+        # writes build/a.
+        dest, srcs, is_dir = target_dir, sources, True
+    elif len(sources) >= 2:
+        # Two operands minimum, so a lone `cp --help`-shaped call names no destination.
+        dest, srcs = sources[-1], sources[:-1]
+        is_dir = len(srcs) > 1 or _looks_like_dir(dest)
+    else:
+        return dests
+    dests.append(dest)
+    if is_dir:
+        for s in srcs:
+            base = os.path.basename(s.rstrip("/"))
+            if base and base not in (".", ".."):
+                dests.append(os.path.join(dest, base))
+    # Deduplicated because the floor and the parse agree on the ordinary `cp a b`, and a
+    # target reported twice is a reason printed twice.
+    return [d for i, d in enumerate(dests) if d and d not in dests[:i]]
 
 
 def find_repo_root(start: str) -> str | None:

@@ -65,12 +65,49 @@ def _mk_repo(tmp, roots=("src", "tests"), settings=None, name="repo"):
     return repo
 
 
-def _run_probe(repo, guard=None, extra=()):
+def _run_probe(repo, guard=None, extra=(), env=None):
     cmd = [sys.executable, PROBE, "--repo", repo]
     if guard:
         cmd += ["--guard", guard]
     cmd += list(extra)
-    return subprocess.run(cmd, capture_output=True, text=True)
+    return subprocess.run(cmd, capture_output=True, text=True, env=env)
+
+
+def _json_probe(repo, guard=None, env=None):
+    """The probe's own report object. Read from a subprocess rather than by calling probe()
+    in-process, because the ~-expansion under test reads $HOME and a test that mutates this
+    process's environment to steer it would be steering the assertion too."""
+    r = _run_probe(repo, guard=guard, extra=["--json"], env=env)
+    return json.loads(r.stdout)
+
+
+def _rows_for(report, entry):
+    """Every row the prober generated FOR one denied_paths entry, matched on the `why` the
+    prober stamped rather than on the path, so the assertion does not have to know how the
+    entry gets spelled."""
+    return [r for r in report["results"] if r["why"] == "denied_path " + entry]
+
+
+def _tree(root):
+    """Every path under root, relative and sorted. Recursive on purpose: a write the probe
+    should never make would land inside a subdirectory, not at the top level."""
+    out = []
+    for base, dirs, files in os.walk(root):
+        for n in dirs + files:
+            out.append(os.path.relpath(os.path.join(base, n), root))
+    return sorted(out)
+
+
+def _ancestors(path, repo_root):
+    """Every proper ancestor directory of an attack path, absolute."""
+    cur = os.path.normpath(path if os.path.isabs(path) else os.path.join(repo_root, path))
+    out = []
+    while True:
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            return out
+        out.append(parent)
+        cur = parent
 
 
 def _stub_guard(tmp, body, name):
@@ -119,8 +156,11 @@ def run(check):
     check("**/.env* still spans the suffix axis",
           {".env.local", ".env.development"} <= set(env_paths), str(env_paths))
 
-    check("a literal entry is attacked at itself and one level inside",
-          probe.denied_attack_paths(".git") == [".git", ".git/child-file"])
+    # An explicit repo_root, because a literal entry's shape is a fact about a tree: with the
+    # cwd's spelling this check would silently change meaning depending on where it was run.
+    with tempfile.TemporaryDirectory() as _t:
+        check("a literal entry is attacked at itself and one level inside",
+              probe.denied_attack_paths(".git", _t) == [".git", ".git/child-file"])
 
     # MUTATION: with instantiation removed, denied_attack_paths falls back to the literal
     # entry -- which is exactly what the broken version did. If the generalised check above
@@ -367,3 +407,147 @@ def run(check):
         check("the clean repo proceeds on the detected answer",
               "frontend: mir-frontend-react" in r.stdout, r.stdout[-300:])
         check("--dry-run still writes nothing", _untouched(repo), str(os.listdir(repo)))
+
+    # ------------------------------------------------ P: attack-surface completeness
+    #
+    # Four defects with one shape: a row that is present, green, and unable to fail. The
+    # count it inflates gets read as coverage, so it is worse than no row at all.
+    #
+    # Every assertion below is the CLASS form -- a question about how the prober CONSTRUCTS
+    # attacks, not about how one entry happens to be spelled today. The instance form
+    # ("`**/.env*` has a Bash row") goes green the moment someone adds a third pattern, which
+    # is precisely how the first of these shipped.
+
+    # ---- the strongest form: does a row distinguish a working guard from a broken one?
+    #
+    # A row that passes against an allow-everything guard proves nothing about the real one.
+    # The mutant is the discriminator: an entry is only covered if some row PASSES the real
+    # guard and FAILS the mutant. Anything else is a tautology wearing a checkmark.
+    with tempfile.TemporaryDirectory() as tmp:
+        repo = _mk_repo(tmp, roots=("src", "tests"), settings=_settings(GOOD_MATCHER),
+                        name="mutant")
+        real = _json_probe(repo)
+        allow_any = _stub_guard(tmp, "import sys\nsys.exit(0)\n", "allow-any.py")
+        mutant = _json_probe(repo, guard=allow_any)
+
+        survivors = [r["path"] for r in mutant["results"]
+                     if r["expect_label"] == "BLOCK" and r["ok"]]
+        check("no BLOCK row survives an allow-everything guard: not one of them passes for "
+              "a reason other than the guard having blocked it",
+              not survivors, f"tautological rows: {survivors}")
+
+        blind = []
+        for _e in schema.BASELINE_DENIED:
+            _good = {r["path"]: r["ok"] for r in _rows_for(real, _e)}
+            _bad = {r["path"]: r["ok"] for r in _rows_for(mutant, _e)}
+            if not any(_good[p] and not _bad.get(p, True) for p in _good):
+                blind.append(_e)
+        check("every denied entry yields at least one attack that PASSES the real guard and "
+              "FAILS an allow-everything one",
+              not blind, f"entries with no discriminating attack: {blind}")
+
+    # ---- 1: a shell redirect for EVERY denied pattern, not just the first one
+    with tempfile.TemporaryDirectory() as tmp:
+        repo = _mk_repo(tmp, roots=(".",), settings=_settings(GOOD_MATCHER), name="shell")
+        rep = _json_probe(repo)
+        _bash = [r for r in rep["results"] if r["kind"] == "bash"]
+        _uncovered = [d for d in schema.BASELINE_DENIED
+                      if probe.is_glob(d) and not any(d in r["why"] for r in _bash)]
+        check("every denied PATTERN gets a shell-redirect attack, not only the first",
+              not _uncovered, f"patterns with no Bash row: {_uncovered}")
+
+        # MUTATION: the defect was a `break` after the first pattern, which pins the count at
+        # one however many patterns the manifest holds. Scaling is the property; a fixed
+        # expected number would go stale the moment BASELINE_DENIED changes.
+        _m = schema.project_manifest("scale", allowed_write_roots=["."])
+        _m["policy"]["denied_paths"] = ["a/p1*", "b/p2*", "c/p3*"]
+        _atk = probe.build_attacks(_m, os.path.join(tmp, "nowhere"))
+        _covered = {d for d in _m["policy"]["denied_paths"]
+                    for a in _atk if a["kind"] == "bash" and d in a["why"]}
+        check("MUTATION: shell-redirect coverage SCALES with the pattern count (a `break` "
+              "pins it at one)", len(_covered) == 3, str(sorted(_covered)))
+        check("one shell row per pattern, not one per instantiation: the count stays linear "
+              "in denied_paths",
+              len([a for a in _atk if a["kind"] == "bash"]) <= len(_m["policy"]["denied_paths"]),
+              str([a["path"] for a in _atk if a["kind"] == "bash"]))
+
+    # ---- 2 and 3: ~-rooted entries, file-shaped entries, and the no-write invariant
+    #
+    # HOME is redirected at a fixture rather than read from the machine, so the assertions
+    # are about the prober's rule and not about whichever dotfiles this developer happens to
+    # have. `.ssh` is a directory here and `.gitconfig` a regular file, which is the only
+    # distinction the rule turns on.
+    with tempfile.TemporaryDirectory() as tmp:
+        fake_home = os.path.join(tmp, "home")
+        os.makedirs(os.path.join(fake_home, ".ssh"))
+        with open(os.path.join(fake_home, ".gitconfig"), "w", encoding="utf-8") as f:
+            f.write("[user]\n")
+        # PYTHONDONTWRITEBYTECODE, because CPython caches .pyc under ~/Library on macOS when
+        # the stdlib is not writable. That is the interpreter writing to HOME, not the probe,
+        # and leaving it in would make the no-write assertion below fail for a reason that has
+        # nothing to do with the property it exists to check.
+        env = dict(os.environ, HOME=fake_home, PYTHONDONTWRITEBYTECODE="1")
+        before = _tree(fake_home)
+
+        # NOT named "home": _mk_repo builds tmp/<name>, so a collision would fill the fixture
+        # home with the repo's own .mir/ and .claude/ and the no-write assertion below would
+        # fail on the test's own doing.
+        repo = _mk_repo(tmp, roots=(".",), settings=_settings(GOOD_MATCHER), name="home-repo")
+        rep = _json_probe(repo, env=env)
+        paths = [r["path"] for r in rep["results"]]
+
+        _tildes = [p for p in paths if p.startswith("~")]
+        check("no attack is fired as a literal `~` spelling: the guard expands `~` on both "
+              "sides, so a tilde-vs-tilde row proves only that the two expansions agree",
+              not _tildes, str(_tildes))
+        check("a ~-rooted denied entry is attacked at its EXPANDED absolute path",
+              os.path.join(fake_home, ".ssh") in paths, str(paths))
+
+        check("a denied entry that is a regular FILE gets no child-path attack: the path is "
+              "unreachable, so the row could never have failed",
+              os.path.join(fake_home, ".gitconfig", "child-file") not in paths, str(paths))
+        check("a denied entry that is a DIRECTORY keeps its child-path attack",
+              os.path.join(fake_home, ".ssh", "child-file") in paths, str(paths))
+        _impossible = [p for p in paths
+                       if any(os.path.isfile(a) for a in _ancestors(p, repo))]
+        check("no attack path is routed through a regular file, so none of them can pass by "
+              "being unreachable rather than by being blocked",
+              not _impossible, str(_impossible))
+
+        # THE SAFETY INVARIANT. The probe fires paths under a real home directory; it is only
+        # safe to do that because it judges paths and never opens one. Asserted against the
+        # fixture home, which is the same code path the user's real one takes.
+        after = _tree(fake_home)
+        check("the probe writes NOTHING into the home it attacks -- an attack is a JSON event "
+              "and an exit code, never an open()",
+              after == before, f"{before} -> {after}")
+
+    # ---- 4: what a BLOCK proves, stated per row instead of pooled into one number
+    with tempfile.TemporaryDirectory() as tmp:
+        narrow = _mk_repo(tmp, roots=("src", "tests"), settings=_settings(GOOD_MATCHER),
+                          name="narrow")
+        wide = _mk_repo(tmp, roots=(".",), settings=_settings(GOOD_MATCHER), name="wide")
+        n, w = _json_probe(narrow), _json_probe(wide)
+
+        check("with the repo root NOT an allowed root, the `.git` rows are labelled "
+              "deny-by-default: the fallback blocks them whether or not the entry works",
+              all(r["proves"] == probe.PROVES_DEFAULT for r in _rows_for(n, ".git")),
+              str(_rows_for(n, ".git")))
+        check("with the repo root allowed, the same `.git` rows are labelled rule: only the "
+              "denied entry can have blocked them",
+              all(r["proves"] == probe.PROVES_RULE for r in _rows_for(w, ".git")),
+              str(_rows_for(w, ".git")))
+        check("a ~-rooted entry is never labelled rule -- a home path cannot be moved inside "
+              "the repo, and the report says so rather than implying coverage it lacks",
+              all(r["proves"] == probe.PROVES_DEFAULT for r in _rows_for(w, "~/.ssh")),
+              str(_rows_for(w, "~/.ssh")))
+        check("no BASELINE_DENIED row falls back to firing a pattern's own spelling",
+              not [r for r in w["results"] if r["proves"] == probe.PROVES_LITERAL],
+              str([r["path"] for r in w["results"] if r["proves"] == probe.PROVES_LITERAL]))
+        check("a positive control carries no `proves` claim; it is the control, not a row "
+              "about a denied entry",
+              all(r["proves"] == "" for r in w["results"] if r["expect_label"] == "ALLOW"))
+        rendered = _run_probe(wide).stdout
+        check("the rendered report warns, under the headline count, about the rows that count "
+              "cannot support",
+              "name a denied_paths entry they do" in rendered, rendered[:400])

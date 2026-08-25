@@ -497,6 +497,19 @@ Not hypothetical. Verified today:
 |---|---|
 | `README.md:142` | "45 directories under `skills/`" … "6 pillars" |
 | `EXTENDING.md:41` | "45 skills: 6 pillars, 13 middle tiers, 26 leaf modules" |
+
+**Fixed 2026-08-25.** The root cause was not a stale number: `mir-init` was missing from the
+README's inventory *tables*, so the total had no row to rest on and correcting the headline
+alone would have left it unsupported. The table now carries an `### Init — 1 skill` section,
+every per-section heading was re-summed against `ls skills/`, and both documents state 46
+skills / 7 pillars / 17 tiers / 22 modules.
+
+Worth recording, because it explains why the two documents disagreed in a way that looked
+like carelessness and was not: `EXTENDING.md`'s "13 middle tiers, 26 leaf modules" was
+internally consistent with its own matrix, which classifies by *domain sense*.
+`validate.py` classifies by *hyphen count*, so a two-tier pillar's direct leaf
+(`mir-database-postgres`, `mir-mobile-ios`) counts as a tier rather than a module. Two
+defensible schemes, no note saying which was in use. Both files now say which one they mean.
 | `validate.py` | **46 skills — 7 pillars, 17 tiers, 22 modules** |
 
 Three sources, three different numbers, none matching. Also: `README.md` contains **zero

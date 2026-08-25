@@ -224,10 +224,10 @@ Task: **add a FastAPI checkout endpoint that charges a card and decrements inven
 | Disclosure level | What loads |
 |---|---|
 | Always on | `AGENTS.md`, the cross-tool baseline. |
-| Index | The names and descriptions for all 45 active skills. This is an index, not 45 full skill bodies. |
+| Index | The names and descriptions for all 46 active skills. This is an index, not 46 full skill bodies. |
 | Matching skill bodies | Exactly `mir-backend`, `mir-backend-python`, and `mir-backend-python-fastapi`. The first owns the generic gates, the second owns CPython concurrency and process behavior, and the third owns FastAPI, Starlette, Async SQLAlchemy, Postgres, Alembic, and Redis mechanics. |
 | Conditional references | The matching bodies direct the agent to `mir-backend/references/runtime-map.md` at Gate 0, the constraint catalog at Gate 1, the failure-mode catalog as needed at Gates 3–4, the generic checklists at Gates 6–7, and `mir-backend-python-fastapi/references/fastapi-gotchas.md` at implementation. The Alembic migration reference is not needed because this example does not change the schema. |
-| Not loaded as bodies | The other 42 active skill bodies: other backend runtimes and frameworks, `mir-frontend` and its tiers, `mir-mobile`, `mir-database`, `mir-cloud`, and `mir-devsecops`. Their descriptions do not match this task or explicitly skip it. Planned skills also have no directory and no body to load. |
+| Not loaded as bodies | The other 43 active skill bodies: other backend runtimes and frameworks, `mir-frontend` and its tiers, `mir-mobile`, `mir-database`, `mir-cloud`, `mir-devsecops`, and `mir-init`. Their descriptions do not match this task or explicitly skip it. Planned skills also have no directory and no body to load. |
 
 If the same change also adds a table or migration, `mir-database` must run for the schema decisions, followed by the appropriate engine module. That is a second pillar run, not a reason to put database rules into the FastAPI module.
 
@@ -242,13 +242,13 @@ Progressive disclosure is the main context constraint behind the flat naming sch
 | 2 | One matching `SKILL.md` body in full. | Only when its description matches the task. The repository aims for roughly 1–3 thousand tokens per body; `validate.py` warns above 380 body lines. |
 | 3 | A referenced file such as a constraint catalog, failure-mode catalog, checklist, or framework gotcha file. | Only when the loaded body explicitly says to read it. |
 
-Adding a skill increases the index descriptions seen at Level 1. It does not make an unrelated skill body load. A FastAPI task therefore pays for three matching bodies, not all 45 bodies. References are split out because a question catalog, migration checklist, or framework example is useful only at the gate that needs it.
+Adding a skill increases the index descriptions seen at Level 1. It does not make an unrelated skill body load. A FastAPI task therefore pays for three matching bodies, not all 46 bodies. References are split out because a question catalog, migration checklist, or framework example is useful only at the gate that needs it.
 
 This is why `AGENTS.md` stays thin, why the directory is flat, why names encode parent tiers, and why Rule 1 requires precise `TRIGGER` and `SKIP` text.
 
 ## Skill inventory
 
-There are **45 directories under `skills/`**. The tables below list every active skill. The validator currently classifies them as 6 pillars, 17 tiers, and 22 modules. Its classification uses hyphen count: a direct leaf under a two-tier pillar is counted as a tier in the validator summary even though the inventory calls it a direct engine or platform module.
+There are **46 directories under `skills/`**. The tables below list every active skill. The validator currently classifies them as 7 pillars, 17 tiers, and 22 modules. Its classification uses hyphen count: a direct leaf under a two-tier pillar is counted as a tier in the validator summary even though the inventory calls it a direct engine or platform module.
 
 ### Backend — 31 skills
 
@@ -324,6 +324,12 @@ There are **45 directories under `skills/`**. The tables below list every active
 | Layer | Skill | Focus |
 |---|---|---|
 | Pillar | `mir-devsecops` | Dependency and lockfile integrity, install scripts, action pinning, provenance and attestations, secrets, pipeline trust, infrastructure state, container posture, IAM, egress, and incident response. |
+
+### Init — 1 skill
+
+| Layer | Skill | Focus |
+|---|---|---|
+| Pillar | `mir-init` | Project harness, not a gated code pillar: detects the stack from lockfiles, confirms it through a deterministic picker, resolves the matching `mir-*` skills, and generates a thin `AGENTS.md`, a `CLAUDE.md`, the `.mir/manifest.json` write policy, and the `PreToolUse` hook that enforces it, then runs a probe to verify the hook blocks the denied paths. |
 
 ### Planned but not written
 
@@ -404,8 +410,8 @@ The four supported tools do not receive the same thing. The table states what `i
 
 | Capability | Claude Code | Cursor | Codex CLI | Antigravity |
 |---|---|---|---|---|
-| Skill bodies linked by `install.sh` | Yes, into `~/.claude/skills` | Yes, the same `~/.claude/skills` links | No — register them yourself | Yes, into the Antigravity skills directory |
-| Reviewer sub-agents linked | Yes, into `~/.claude/agents` | Yes, the same `~/.claude/agents` files | No — register them yourself | No files installed; checklists run inline |
+| Skill bodies linked by `install.sh` | Yes, into `~/.claude/skills` | Yes, the same `~/.claude/skills` links | Yes, into `$CODEX_HOME/skills` (default `~/.codex/skills`) | Yes, into the Antigravity skills directory |
+| Reviewer sub-agents linked | Yes, into `~/.claude/agents` | Yes, the same `~/.claude/agents` files | No — Codex has no directory for standalone agents; checklists run inline via the AGENTS.md pipeline | No files installed; checklists run inline |
 | Always-on `AGENTS.md` | Not linked by `install.sh`; `mir init` generates a per-repo one | Not linked; copy this repository's `AGENTS.md` into a project root | Yes, `~/.codex/AGENTS.md` | Yes, `~/.gemini/AGENTS.md` |
 | `mir init` harness generated | Yes | Not targeted, but Cursor reads the same `.claude/settings.json` | No | No |
 | Enforced write policy | Yes — `PreToolUse` guard plus a probe that verifies it | Conditional — only if third-party configs are enabled | Not emitted by this repository | Not emitted by this repository |
@@ -463,15 +469,16 @@ Treat this as unverified until you check it yourself. The claim comes from Curso
 ./install.sh --tool=codex
 ```
 
-The script links `AGENTS.md` to `~/.codex/AGENTS.md`. It does not copy the skills or reviewer files into a Codex-native registry. Register those through Codex's `/skills` and custom-agent configuration as appropriate for the local installation.
+Default targets are `$CODEX_HOME/skills/<skill-name>` (default `~/.codex/skills`) and `~/.codex/AGENTS.md`. `--scope=pillars` is honoured the same way it is for Claude Code.
 
-Verify the baseline link:
+Verify the links:
 
 ```bash
+ls -l ~/.codex/skills/mir-backend
 ls -l ~/.codex/AGENTS.md
 ```
 
-**What you get.** Skill bodies: none installed by the script; register them through Codex's `/skills` configuration. Reviewer sub-agents: none installed; register them through the custom-agent configuration, and run their checklists inline until you do. Always-on `AGENTS.md`: yes, the global `~/.codex/AGENTS.md` link. Generated write-policy harness: none.
+**What you get.** Skill bodies: linked into `$CODEX_HOME/skills` and loaded on demand by description — verified against codex-cli 0.147.0 rather than assumed: `codex debug prompt-input` renders the model-visible prompt, and a probe skill planted there came back in the "## Skills / ### Available skills" block with a `file:` locator naming the path, confirming Codex's loader follows a symlinked skill directory. This is also the path Codex's own bundled `skill-installer` skill documents: "Installs into `$CODEX_HOME/skills/<skill-name>` (defaults to `~/.codex/skills`)." An earlier version of this installer linked only `AGENTS.md` and told users to register skills through `/skills`; that instruction was wrong — `/skills` only toggles skills already discovered from a root, so a skill that is nowhere on disk under a root can never appear there to select. Reviewer sub-agents: none, and this is a verified absence rather than a gap — agent `.md` files planted in four candidate locations (`$CODEX_HOME/agents`, `$HOME/.agents/agents`, `<repo>/.agents/agents`, and `<repo>/.codex/agents`) never appeared in the rendered prompt. Codex has no directory for standalone reviewer agents; the reviewers run inline through the AGENTS.md pipeline instead, their checklists shipping inside the skill bodies. Always-on `AGENTS.md`: yes, the global `~/.codex/AGENTS.md` link. Generated write-policy harness: none.
 
 **On enforcement.** Codex CLI has a real `PreToolUse` hook mechanism (`.codex/hooks.json`) and an OS-enforced sandbox, so a write policy is enforceable on this tool. `make-it-right` does not generate either yet. The tool supports it; `mir init` does not emit it. Until it does, nothing in this repository enforces the write policy on Codex.
 
@@ -541,6 +548,8 @@ Installing is `ln -sfn`, which overwrites but never removes. Three things follow
 | `--prune` | Remove this checkout's stale links, then install. The upgrade path, and the one that makes `--scope=pillars` actually cut the global index. |
 | `--prune-only` | Remove them and stop. The uninstall path. Skips `validate.py`, because the one command that removes a broken install must not be gated on the install not being broken. |
 | `--dry-run` | Print every removal and link and change nothing on disk. Combines with either flag above. |
+| `--force-prune-path=<old-dir>` | Adopt links left by a checkout that was moved rather than re-cloned. Requires `--prune` or `--prune-only`. |
+| `--confirm-force-prune` | The second key `--force-prune-path` needs before it removes anything. |
 
 ```bash
 ./install.sh --prune --dry-run                    # see what would go
@@ -551,6 +560,13 @@ Installing is `ln -sfn`, which overwrites but never removes. Three things follow
 **Removal is opt-in, always.** A plain `./install.sh` never deletes anything under your home directory. It counts what looks stale and prints a `WARN` pointing at `--prune --dry-run`.
 
 A link is removed only when the installer can prove it owns it: the basename is `mir-*` for skills or `*.md` for agents, the entry is a symlink — a real file or directory is never touched — and the link target resolves inside this checkout. A `mir-*` link pointing at a different checkout belongs to another setup and prints `KEEP`. `CLAUDE_HOME`, `CODEX_HOME`, and `GEMINI_HOME` are honoured.
+
+**A moved checkout.** Ownership is proved by resolving a link's target and checking that it resolves inside this checkout. If the checkout was moved rather than re-cloned in place, every old link now names a path that does not exist — which is indistinguishable from a link into a colleague's checkout that they since deleted, so ordinary `--prune` correctly refuses both and the orphans stay forever. `--force-prune-path=<old-dir>` is how you supply the one fact the script cannot derive: that the named path used to be this checkout. It is dry-run by default; `--confirm-force-prune` is the second key that turns the printed list into an actual removal. Two invariants hold regardless: it only ever unlinks symlinks that are already in mir's own namespace (`mir-*` for skills, `*.md` for agents) and whose target sits under `<old-dir>/skills` or `<old-dir>/agents`, and it never touches anything else under the supplied path — a real file or directory is never removed by any flag.
+
+```bash
+./install.sh --prune-only --force-prune-path=/old/path/to/make-it-right                            # dry run: list what would go
+./install.sh --prune-only --force-prune-path=/old/path/to/make-it-right --confirm-force-prune       # actually remove them
+```
 
 `--prune` also cleans the legacy `~/.gemini/antigravity/skills` path that installs before `v1.0.0` wrote to, and never installs there.
 
@@ -575,6 +591,7 @@ A repository that never runs `mir init` still gets the pillar gates. That is the
 python3 init/cli.py init .                 # from the make-it-right checkout
 ~/src/make-it-right/bin/mir init .         # the same CLI through the shim, by absolute path
 alias mir='~/src/make-it-right/bin/mir'    # optional; then `mir init .` works
+mir --version                              # confirm which checkout you are running
 ```
 
 ### What it does
@@ -597,6 +614,20 @@ Five steps, in order. Each exists because the step before it can be wrong.
    | `3` | **Inconclusive.** A positive control was blocked, the guard returned an unexpected code, or the wiring could not be confirmed. |
 
    Exit `3` exists because a guard that blocks everything is not simply "too tight". When the positive control is blocked, every `BLOCK` row becomes uninformative — you can no longer tell "blocked because the policy denies it" from "blocked because the guard is broken". The positive control is the only discriminating row in the table, so a run that loses it proves nothing in either direction. Pass `--allow-false-blocks` if the over-tightening is deliberate; it never silences a leak. `mir init` passes the probe's code through rather than flattening every failure to `1`.
+
+   **What a `BLOCK` row actually proves.** Every attack row that names a `denied_paths` entry now carries a `proves` column, because "blocked" is not one claim:
+
+   | Value | What it means |
+   |---|---|
+   | `rule` | The target is inside an allowed write root, so only the denied entry could have blocked it. Real coverage of that rule. |
+   | `deny-by-default` | The target is outside every allowed root, so the fallback would block it whether or not its `denied_paths` entry works. Over-determined — the row is coverage of the fallback, not of the entry printed beside it. |
+   | `pattern-literal` | The entry could not be instantiated into a concrete path, so its own spelling was fired. No agent ever writes a path containing `*`; the row is a placeholder, not a test. |
+
+   This matters because "N/N attacks passed" is the line a reader takes away from the top of the report, and it oversells: in a freshly generated harness, 15 of the 34 entry-naming rows are `deny-by-default` — every `~`-rooted entry is this shape by construction, since a home-directory path cannot be moved inside the repo. The report now prints a warning directly under the headline count naming the rows that count cannot support.
+
+   A `~`-rooted denied entry (`~/.ssh`, `~/.aws`, `~/.claude`, and the rest of the default list) is attacked at its **expanded absolute path**, not the four characters `~/.ssh` — the guard expands `~` on both sides of every comparison, so firing the literal tilde back at it would only prove the two expansions agree with each other. A clean run on one of these rows proves deny-by-default fired, not that the entry itself works.
+
+   The probe never opens or writes an attack path. An attack is a JSON event piped to the guard and a judgment on its exit code; the only filesystem call the probe makes against an attack path is a read-only stat, used to decide whether a denied entry is a file (and so has no reachable child to attack). That is what makes it safe to fire paths under the user's real home directory, and it is enforced by a test that snapshots the attacked home directory before and after a probe run and asserts nothing in it changed.
 
 ### Commands
 
@@ -652,8 +683,17 @@ Coverage of the *tools* is partial by construction, and the guard reports that r
 | Tool | Coverage | Why |
 |---|---|---|
 | `Write`, `Edit`, `MultiEdit`, `NotebookEdit`, `Update` | Full | The write target is a structured path field the guard can read directly. |
-| `Bash` | Partial | The target is inside a shell string. The guard matches explicit `>`, `>>`, `tee`, `dd of=`, `cp`, `mv`, and `install` forms. A shell can hide a write from a regex — `eval`, a script, a heredoc to a variable path — so a clean Bash result is not proof. |
+| `Bash` | Partial | The target is inside a shell string, not a structured field. The guard splits the command into shell segments, tokenises each, and reads the destination per verb — `>`, `>>`, `&>file`, `>&file`, `tee` (every operand, not just the first), `dd of=`, and `cp`/`mv`/`install`, including `-t DIR` and the per-source path each operand of a multi-source copy lands on. |
 | MCP tool writes, `apply_patch`, other specialized write tools | None | Not parsed at all. |
+
+A tokenising parser still cannot see everything a shell can do. Four gaps stay, which is why the row above stays labelled PARTIAL rather than Full:
+
+1. **Indirection.** `eval`, `bash -c`, a script file, or a path held in `$VAR` or `$(...)` — the guard reads tokens, and none of these carry the destination as a literal token.
+2. **`cp a b` where `b` is an existing directory.** The write actually lands at `b/a`, and the guard names only `b`. Multi-source copies and a trailing `/` are decidable from syntax alone and are handled; the plain two-operand form is not, because deciding it would mean stat-ing a path the command has not created yet.
+3. **Verbs that write a file they never name as a destination operand** — `sed -i`, `tar -x`, `git checkout`, and similar.
+4. **A shell function, alias, or `$PATH` shadow that renames a verb.** `tee` is matched by its name, and a name is not a promise.
+
+A clean Bash result is not proof.
 
 The guard also fails open on its own errors. A missing manifest or unparseable JSON allows the call and says so on stderr, because a policy that bricks the agent when the policy has a bug is worse than one that is honest about not being loaded.
 
@@ -661,7 +701,7 @@ A clean probe proves the guard enforces the paths the probe tested. It does not 
 
 ## Extending the repository
 
-Read [EXTENDING.md](EXTENDING.md) before adding a skill. It documents the placement test, the naming convention, the progressive-disclosure rules, and copy-and-edit recipes.
+Read [EXTENDING.md](EXTENDING.md) before adding a skill. It documents the placement test, the naming convention, the progressive-disclosure rules, and copy-and-edit recipes. See the [Changelog](CHANGELOG.md) for what changed release to release, and [RELEASING.md](RELEASING.md) for the procedure a release itself has to follow.
 
 ### Placement test
 
