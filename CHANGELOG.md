@@ -20,6 +20,21 @@ holds the current version as one line with no `v` prefix; the `v` belongs to the
 
 ## [Unreleased]
 
+## [2.0.2] - 2026-08-26
+
+### Changed
+
+- Reworked the README for non-technical readers, architects, and maintainers: it now leads
+  with the problem, solution, support status, installation path, and project workflow.
+- Replaced internal workflow labels in the generated diagrams with plain-language steps and
+  kept the deeper architecture diagrams available as expandable detail.
+- Updated the skill-tree links and corrected the generated workflow's rejected-plan wording.
+
+### Upgrading
+
+- No migration is required. Pull the new tag or use a fresh checkout; the installer and
+  project harness behavior are unchanged.
+
 ## [2.0.1] - 2026-08-25
 
 `2.0.0` was tagged but never released: its release workflow failed on `ubuntu-latest`
