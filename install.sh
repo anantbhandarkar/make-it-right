@@ -124,7 +124,14 @@ install_codex() {
 install_antigravity() {
   local base="${GEMINI_HOME:-$HOME/.gemini}"
   echo "→ Antigravity  ($base)"
-  install_skills_to "$base/antigravity/skills"
+  # Global user skills live in config/skills, NOT antigravity/skills. Antigravity
+  # generates a read_file allowlist into its own system prompt, and that table names
+  # ~/.gemini/config/skills (allowed for both the CLI and the IDE) while
+  # ~/.gemini/antigravity/skills appears nowhere in it. `antigravity/` is the legacy
+  # Antigravity 2.0 product dir; ~/.gemini/config/.migrated records the move. Skills
+  # linked into the old path are silently never loaded -- the failure this repo exists
+  # to prevent, one layer down at the install boundary.
+  install_skills_to "$base/config/skills"
   link "$REPO_DIR/AGENTS.md" "$base/AGENTS.md"
   echo "  NOTE  Skills load on-demand by description. Reviewer agents run inline per the"
   echo "        AGENTS.md pipeline (their checklists ship inside the mir-backend skill)."
