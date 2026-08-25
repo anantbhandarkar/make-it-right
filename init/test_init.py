@@ -41,6 +41,17 @@ def _mk_repo(roots, tmp):
     json.dump(m, open(os.path.join(repo, ".mir", "manifest.json"), "w"))
     import shutil
     shutil.copy(os.path.join(HERE, "guard.py"), os.path.join(repo, ".mir", "guard.py"))
+    # Register the hook, because the probe now checks that it IS registered. A repo with a
+    # manifest and a guard but no hook entry is not a passing harness -- nothing routes a
+    # write to the guard, so it enforces nothing. The fixture has to look like an installed
+    # harness or it tests a state no real user is ever in.
+    #
+    # Built from generate.py's own constants rather than a literal: if MATCHER changes and
+    # this string does not, the fixture goes stale in exactly the way the wiring phase was
+    # added to catch, and the test would start passing for the wrong reason.
+    os.makedirs(os.path.join(repo, ".claude"), exist_ok=True)
+    settings, _ = gen.merge_settings(None, ".mir/guard.py")
+    json.dump(settings, open(os.path.join(repo, ".claude", "settings.json"), "w"))
     return repo
 
 
@@ -243,6 +254,36 @@ check("every skill's TRIGGER clause survives the truncation",
       not _notrig, f"{len(_notrig)} lose TRIGGER: {_notrig[:6]}")
 _over = [d for d in _all if len(_desc(d)) > CAP]
 check("no description exceeds the cap at all", not _over, f"{len(_over)} over: {_over[:6]}")
+
+# -- per-area suites --------------------------------------------------------
+# This file stays the single entry point and the single tally. Each area owns exactly
+# one init/test_<area>.py defining `run(check)`, so several of them can be written in
+# parallel without anyone editing a shared file. `check` is injected rather than
+# imported, so a submodule pulls in no test framework and counts into the same total.
+#
+# Reserved names, one owner each:
+#   test_guard.py          enforcement core   (guard.py, schema.py)
+#   test_generate.py       generation         (generate.py)
+#   test_verify.py         verification + CLI (probe.py, cli.py)
+#   test_install_prune.py  installer prune    (install.sh)
+#   test_cross.py          end-to-end spans
+#
+# A test_*.py without run() is a FAIL, not a skip: a suite that loads nothing and says
+# nothing is the exact failure this repository exists to prevent. Each module is
+# isolated so one that raises costs its own FAIL instead of zeroing everyone else's.
+import importlib  # noqa: E402
+
+for _name in sorted(f[:-3] for f in os.listdir(HERE)
+                    if f.startswith("test_") and f.endswith(".py") and f != "test_init.py"):
+    print(_name)
+    try:
+        _mod = importlib.import_module(_name)
+        _run = getattr(_mod, "run", None)
+        check(f"{_name} defines run(check)", _run is not None)
+        if _run:
+            _run(check)
+    except Exception as _e:
+        check(f"{_name} ran without raising", False, repr(_e))
 
 print()
 print(f"{PASS} passed, {FAIL} failed")

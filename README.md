@@ -9,7 +9,9 @@ It is not a framework or a runtime. It is a flat collection of pillar, runtime, 
 ## Contents
 
 - [Quickstart](#quickstart)
-- [What this solves](#what-this-solves)
+- [Why use this](#why-use-this)
+- [When to use it, and when not to](#when-to-use-it-and-when-not-to)
+- [How it works](#how-it-works)
 - [The eight gates](#the-eight-gates)
 - [Pillars and their differences](#pillars-and-their-differences)
 - [Skill selection and the three-tier chain](#skill-selection-and-the-three-tier-chain)
@@ -38,7 +40,9 @@ Restart the agent so it indexes the new resources, then describe a task in plain
 
 `install.sh` does not put `bin/mir` on `PATH`, so run it by path or alias it. What each tool actually receives differs, and the differences are not cosmetic — read [Tool support at a glance](#tool-support-at-a-glance) before assuming parity.
 
-## What this solves
+## Why use this
+
+The thesis the skills state directly: a model does not fail at writing code, it fails at knowing which code to write. Pattern completion produces something locally correct that violates a rule nobody wrote down, and a passing happy-path test says nothing about that rule.
 
 Consider an order endpoint that charges a card and decrements the last unit of inventory. Locally correct code can still do all of the following:
 
@@ -48,19 +52,108 @@ Consider an order endpoint that charges a card and decrements the last unit of i
 4. Let two concurrent requests decrement the same last unit.
 5. Send an email before the database transaction commits.
 
-Each step can look reasonable in isolation. The combined behavior is wrong under a dropped response, a race, or a partial failure.
+Each step can look reasonable in isolation. The combined behavior is wrong under a dropped response, a race, or a partial failure, and nothing in the test suite goes red.
 
-The backend pillar makes the agent define the relevant invariants, state transitions, transaction boundaries, idempotency key and store, time to live, external-call behavior, and observability plan before implementation. The user confirms the assumptions and approves the design. Reviewers then check the actual diff for duplicate side effects, missing ownership checks, unsafe migrations, and missing telemetry.
+The reason to adopt the kit is that these failures are enumerated in advance, written down as named classes, and attached to the gate that has to answer them. Every row below is a rule an active skill actually carries, not a category:
 
-The same method is adapted to other work:
+| Failure class | The concrete form the skills name | Where it is written |
+|---|---|---|
+| Retry without deduplication | A model adds retries but not dedup. Production is at-least-once, so the result is a duplicate charge, a double email, or a replayed webhook. Every retryable state-changing endpoint needs a key, a store for it, and a time to live. | `mir-backend` Gate 5, failure-mode catalog |
+| Partial failure | "Redis is down but the database is up." The email sent but the transaction rolled back. The payment webhook arrived before the row existed. For each external call, enumerate the half-success states. | `mir-backend` Gate 3, failure-mode catalog |
+| Concurrency on a lifecycle | Asked for a status field, a model generates CRUD; the domain is a state machine. Two concurrent transitions both succeed unless the update is conditional on the current state. | `mir-backend` Gate 3 |
+| Authorization beyond authentication | A valid token says *who* is calling and nothing about whether that caller may touch *this* row. The ownership check belongs in the same query that loads the row, not in a branch after it. OWASP ranks broken object-level authorization first in its API Security Top 10. | `mir-backend` Security, `security-reviewer` |
+| Mass assignment | Binding a request body onto a persisted object is how a user sets their own `role`, `is_admin`, `tenant_id`, `price`, or `verified`. The response side is the same bug reversed. | `mir-backend` Security |
+| Tenant isolation | Enforced per query, not per login. Cache keys, rate-limit counters, search indexes, storage prefixes, background jobs, and exported files are queries too, and are where the missing filter usually is, because nobody reviews them. | `mir-backend` Security, `mir-database` |
+| Migration safety on populated tables | Migrations get written as if the table is empty. During a rolling deploy the old code and the new code run at the same time against one schema, so every statement has to be correct for both. | `mir-database`, `migration-reviewer` |
+| Async UI state | A slow search response arrives after a fast one and replaces fresh data with stale data. The debounce interval, the empty state, the error copy, and the cancellation semantics were never specified, so the model invented them. | `mir-frontend` Gates 0–1 |
+| Client-side authorization | `if (user.isAdmin)` decides what is **drawn**, never what is **fetched**. A record that reached the client cache was in a network response and is readable in the browser. | `mir-frontend` Security |
+| Hydration and shared client state | A module-scope cache, store, or client instance on a server-rendered path is shared by every request, which is a cross-user bleed risk rather than a caching detail. Server rendering also forces the hydration-mismatch and double-fetch-waterfall questions to be answered before code. | `mir-frontend` Gate 0 |
+| Secrets in the browser bundle | `NEXT_PUBLIC_*`, `VITE_*`, `PUBLIC_*` and their siblings are inlined as string literals at build time, so rotating one needs a rebuild and every build already shipped still carries the old value. | `mir-frontend` Security |
+| Process death on mobile | The operating system kills the app mid-upload. Delivering the file exactly once across that needs a checkpoint and an idempotency key that survives the process, plus a defined branch for a permanently denied permission. | `mir-mobile` Gate 0 |
+| Provider chosen before the constraints | A provider gets named from familiarity and justified afterwards, before anyone checked data residency, a runtime-duration ceiling, egress volume, idle and cold-start cost, or the cost of leaving a managed service. | `mir-cloud` Gates 1 and 3 |
+| Delivery-path trust | A pull request runs with release credentials, an action pinned to a tag follows that tag to a new commit, or a scanner reports findings without blocking the build. | `mir-devsecops` Gate 0 |
+| Observability | Functionality ships before operability. A missing correlation ID, an absent business metric, and an unwritten alert condition are all invisible in a passing test. | `mir-backend` Gate 5 |
 
-| Work | Failure the matching pillar is designed to catch |
-|---|---|
-| Browser UI | A search result arrives out of order, a stale response replaces fresh data, or a keyboard user cannot operate the control. |
-| Database schema | A nullable column hides an undefined domain rule, or a migration takes an exclusive lock on a populated table. |
-| Native mobile app | The operating system kills the process, a permission is permanently denied, or a retried request creates a duplicate write. |
-| Cloud choice | A provider is selected before checking residency, execution limits, egress, idle cost, or the cost of leaving a managed service. |
-| Delivery pipeline | A pull request runs with release credentials, an action tag moves to a malicious commit, or a scanner reports findings without blocking the build. |
+The mechanism is the same in every case. The pillar makes the agent state the invariants, state transitions, transaction boundaries, idempotency key and store, external-call behavior, and observability plan before implementation. The user confirms the assumptions and approves the design. Reviewers then read the actual diff for duplicate side effects, missing ownership checks, unsafe migrations, and missing telemetry.
+
+**What it costs.** Turns, spent before any code exists. Gate 1 asks up to four questions. Gate 2 requires you to confirm a numbered ledger. Gate 5 requires you to approve a design. That is three explicit stops on a task a bare model would have answered in one reply, and Gate 7 then spends further turns reviewing the diff it produced. Context is the second cost: a matching task loads a pillar body, a tier body, and a module body plus the references they call for, and every installed skill's description is read at session start in every repository whether it is relevant or not — see [Install scope and token cost](#install-scope-and-token-cost). That trade pays when a wrong answer is expensive to discover in production. It does not pay otherwise, which is the next section.
+
+## When to use it, and when not to
+
+The skills encode this themselves. Each pillar's Gate 0 opens with a risk table, and every pillar instructs the agent to drop to `--advisory` and proceed lightly when zero boxes tick. Each description carries a `SKIP` clause naming the adjacent work it must not load for. The lists below are those rules restated for a human deciding before the agent runs.
+
+### Use it when
+
+- **The change writes persistent state.** Anything that can be retried, raced, or half-applied.
+- **Money, inventory, credits, quotas, authentication, or authorization are involved.** These are where an invented default becomes a chargeback or a breach.
+- **The path runs under concurrency or has retries.** Two requests on the last unit; a client that retries a timeout.
+- **The work spans more than one table or more than one service.** Transaction boundaries and partial failure stop being implicit.
+- **An external dependency is in the path** — payment, email, queue, third-party API. Every one of them has a half-success state.
+- **The thing has a lifecycle.** States, valid transitions, and the transitions that must be rejected.
+- **A migration will run against populated tables.** Lock class per statement, expand and contract, compatibility with the currently deployed code.
+- **The system is multi-tenant, or stores PII or regulated data.** Isolation, retention, deletion, and audit are design decisions, not later work.
+- **Frontend work carries async state** — data fetching, forms, server rendering and hydration, shared client state, auth-gated UI, or anything rendering untrusted content.
+- **Native mobile work touches process death, runtime permissions, offline sync, background execution, or store submission.**
+- **The provider or compute model is still open.** `mir-cloud` triggers only while that decision is unmade.
+- **The change is to the delivery path** — a dependency bump, a third-party action, a secret, a published artifact, IaC, or a container base image.
+
+### Do not use it when
+
+This list is not shorter than the one above, and the skills are the reason.
+
+- **It is a one-line fix.** A typo, a copy change, a constant, a log line, a rename the compiler verifies.
+- **The task is read-only or pure compute.** A report query, a formatter, a parser. `mir-backend` Gate 0 says it plainly: do not bureaucratize a CSV parser.
+- **The component is stateless and presentational.** `mir-frontend` Gate 0 sends that case to `--advisory` before Gate 1 runs.
+- **The table is a scratch table or a ten-row static lookup.** `mir-database` Gate 0 says the same about schema work with no risk surface.
+- **The deployment is hobby scale.** `mir-cloud` Gate 0 is explicit that a personal site does not get a procurement process.
+- **The pipeline change ticks no boxes and involves no credential.** `mir-devsecops` Gate 0 drops to `--advisory` there.
+- **The code is throwaway.** A one-off script against your own data, a fixture generator, a migration you will run once and delete.
+- **You are exploring, not building.** Reading code to understand it, reproducing a bug, or running a spike whose output you intend to throw away. The gates want decisions; a spike exists to find out what the decisions are.
+- **You already know the constraints and want speed.** The interrogation round is designed to extract what you have not said. If you have said it, the round asks questions whose answers you already gave, and the honest move is to state the constraints up front and use an opt-out.
+- **The design is already approved elsewhere.** If a human architect has settled the transaction boundaries and the idempotency mechanism, running Gate 5 to re-approve them is ceremony.
+- **The work belongs to a pillar you are not running.** A `SKIP` clause is a real instruction: schema decisions do not belong in a framework module, and pipeline security does not belong in a request handler. A task that spans two pillars gets two gate runs, not one merged pipeline.
+
+### The explicit opt-outs
+
+Two flags exist so that skipping the process is a stated choice rather than a silent bypass. Neither turns the skill off.
+
+| Flag | What it lifts | What it still requires |
+|---|---|---|
+| `--advisory` | The one hard rule. Code, DDL, or infrastructure configuration may be written without a passed Gate 5, and Gate 2 may pass without an explicit confirmation. | The skills document it only as those two overrides. They do not describe it as suppressing Gate 3, Gate 4, or the Gate 7 review, and the pillars invoke it themselves as "proceed lightly" rather than "stop". |
+| `--skip-interrogation` | The Gate 1 question round, including the `constraint-interrogator` sub-agent. | The Gate 2 Assumption Ledger is still written, from the defaults, and still has to be confirmed. Skipping the questions does not skip the record of what was assumed. |
+
+Read the coverage precisely rather than assuming parity. All six gated pillars name `--advisory` as the override on their Gate 5 rule; the Gate 2 silence override is written in `mir-backend`, `mir-frontend`, `mir-mobile`, `mir-database`, and `mir-cloud`, but not in `mir-devsecops`. Those same five carry `--skip-interrogation` in their `argument-hint`; `mir-devsecops` documents only `--advisory`. `mir-init` takes neither, because it is not a gated pipeline.
+
+## How it works
+
+Two mechanisms ship in this repository, and they are not the same thing. The first is skill routing, which decides what instructions the agent reads. The second is the `mir init` harness, which decides what files the agent is permitted to write. They are independent, and conflating them is the easiest mistake a reader can make here.
+
+### The routing mechanism, in the order a task flows through it
+
+1. **The description is the router.** You describe the task in plain language; you do not name a skill. At index time the host has seen only each skill's `name` and `description`, and every description must state both a `TRIGGER` clause and a `SKIP` clause. That text is the routing logic, and `validate.py` makes both clauses mandatory rather than conventional. Typing `/mir-backend <task>` forces a specific skill when you want to override the match. See [Rule 1](#rule-1-the-description-is-the-router).
+
+2. **The matching skills load coarse to fine.** A backend task loads the pillar (`mir-backend`), then the runtime tier (`mir-backend-python`), then the framework module (`mir-backend-python-fastapi`). The pillar owns what is true in any language, the tier owns what is true for every framework on that runtime, and the module owns one library's mechanics. They load *together*, never instead of one another. Hosts scan `skills/` one level deep, so the hierarchy lives in the name; `validate.py` treats a name whose parent chain does not exist as an error, downgraded to a warning only when the missing parent is listed in `.mir-planned`. See [Skill selection and the three-tier chain](#skill-selection-and-the-three-tier-chain).
+
+3. **The loaded pillar runs eight gates.** Gates 0 through 5 establish what is true — intent and risk surface, the interrogation round, the confirmed ledger, invariants and failure modes, the risk register, the approved design. Gate 6 is the first place code may appear. Gate 7 reviews it. Three of the eight require explicit user input and cannot be self-approved. See [The eight gates](#the-eight-gates).
+
+4. **Gate 7 dispatches read-only reviewers.** `reliability-reviewer` and `security-reviewer` run on the backend, frontend, mobile, database, and cloud pillars; `mir-devsecops` runs `security-reviewer` alone against its pipeline threat checklist. `migration-reviewer` runs only when migration files changed. `a11y-reviewer` runs for frontend and mobile, `frontend-perf-reviewer` for frontend. They report severity-tagged findings with file and line references and a proposed fix, and they do not edit code — the orchestrating agent triages and fixes, and the pillars tell it to read the flagged diffs rather than relay a reviewer's summary as fact. Where a host has no sub-agent facility, each skill instructs the agent to run the same checklist inline. See [Reviewer sub-agents](#reviewer-sub-agents).
+
+Everything in that list is instruction. A model follows it; nothing in this repository forces it to.
+
+### The harness mechanism, run once per repository
+
+`mir init` is separate and does not participate in the gates at all. It runs once against a repository, detects and confirms the stack, resolves the matching skills, and generates a write policy plus the `PreToolUse` hook that enforces it, then runs a probe to check that the hook actually blocks the denied paths. See [Project harness (`mir init`)](#project-harness-mir-init).
+
+The distinction that matters:
+
+| | Skill routing | The `mir init` harness |
+|---|---|---|
+| What it controls | Which instructions enter the agent's context | Which paths the agent may write |
+| How it takes effect | The model reads a skill body and follows it | A hook process returns a blocking exit code before the write happens |
+| Installed by | `install.sh`, globally — but what each tool actually receives differs, so read [Tool support at a glance](#tool-support-at-a-glance) | `mir init`, per repository, Claude Code only |
+| If it fails | The agent proceeds without the guidance | On its own errors the guard fails open, allows the call, and says so on stderr |
+
+The guard has no notion of a gate, a ledger, or an approval, and the skills have no notion of the write policy. So the harness cannot stop an agent from writing code before Gate 5, and the gates cannot stop a write to a denied path. Each covers what it covers, and the rest of this document is careful about which one is doing the work in any given claim.
 
 ## The eight gates
 
@@ -439,6 +532,28 @@ The reason to care is the Level 1 index described in [Progressive disclosure and
 
 Both figures are approximations measured by summing the `name` and `description` characters of the linked tree. Measure your own install rather than quoting these if the number has to be exact.
 
+### Keeping the install in sync
+
+Installing is `ln -sfn`, which overwrites but never removes. Three things follow. A skill renamed or deleted in a later release leaves a symlink that resolves to nothing, so the user sees a skill name that loads no content — the failure this repository exists to prevent, reappearing one layer down at the install boundary, where `validate.py` cannot see it because it validates the repository rather than your `$HOME`. Reducing `--scope` used to be a no-op that reported success: `--scope=pillars` wrote 7 links, left the other 39 in place, and printed `linked 7 pillar(s) globally` while the global index was unchanged. And moving or re-cloning the repository orphaned every link with no command to repair it.
+
+| Flag | Effect |
+|---|---|
+| `--prune` | Remove this checkout's stale links, then install. The upgrade path, and the one that makes `--scope=pillars` actually cut the global index. |
+| `--prune-only` | Remove them and stop. The uninstall path. Skips `validate.py`, because the one command that removes a broken install must not be gated on the install not being broken. |
+| `--dry-run` | Print every removal and link and change nothing on disk. Combines with either flag above. |
+
+```bash
+./install.sh --prune --dry-run                    # see what would go
+./install.sh --tool=all --scope=pillars --prune   # upgrade, and actually shrink the index
+./install.sh --tool=all --prune-only              # uninstall
+```
+
+**Removal is opt-in, always.** A plain `./install.sh` never deletes anything under your home directory. It counts what looks stale and prints a `WARN` pointing at `--prune --dry-run`.
+
+A link is removed only when the installer can prove it owns it: the basename is `mir-*` for skills or `*.md` for agents, the entry is a symlink — a real file or directory is never touched — and the link target resolves inside this checkout. A `mir-*` link pointing at a different checkout belongs to another setup and prints `KEEP`. `CLAUDE_HOME`, `CODEX_HOME`, and `GEMINI_HOME` are honoured.
+
+`--prune` also cleans the legacy `~/.gemini/antigravity/skills` path that installs before `v1.0.0` wrote to, and never installs there.
+
 **The progressive model.** Install the pillar floor once, globally, and let each repository top itself up with only the tiers and modules it uses:
 
 ```bash
@@ -467,10 +582,21 @@ alias mir='~/src/make-it-right/bin/mir'    # optional; then `mir init .` works
 Five steps, in order. Each exists because the step before it can be wrong.
 
 1. **Detect.** Reads `package.json`, `go.mod`, `Cargo.toml`, `requirements.txt`, `pyproject.toml`, `Gemfile`, `composer.json`, `mix.exs`, and `*.xcodeproj`. Detection proposes with a stated reason and a confidence; it never decides silently. Two frameworks in one pillar is a conflict to resolve, not a guess to make.
-2. **Confirm.** The picker's options are derived from the installed skill tree, so they cannot drift from what exists. A stack with no matching skill is an explicit choice recorded as a gap, never dropped. The picker is presented by the `/mir-init` skill, which asks the questions through the agent. Running `init/cli.py` directly does **not** prompt: it takes the detected proposal for each pillar and proceeds. Use `--answers` to state the stack explicitly, or `--noninteractive`, which refuses to guess when detection is ambiguous rather than picking one.
+2. **Confirm.** The picker's options are derived from the installed skill tree, so they cannot drift from what exists. A stack with no matching skill is an explicit choice recorded as a gap, never dropped. The interactive picker is presented by the `/mir-init` skill, which asks the questions through the agent; `init/cli.py` never prompts. What the CLI does instead is refuse. If any pillar collected more than one candidate, or a detected stack has no skill, it stops with exit `3` and writes nothing, prints that pillar's options, and hands you a paste-ready `--answers` stub. A guessed stack loads the wrong gates, which is worse than no gates, because it reads as verified.
 3. **Resolve.** The confirmed answers map to a coarse-to-fine skill set — pillar, then tier, then module. `mir-devsecops` is always included, so security is not an opt-in.
 4. **Generate.** Writes the files in the table below.
-5. **Verify.** Runs `.mir/probe.py` against the generated guard. The probe derives its attacks from the manifest, so it tests your policy rather than a fixed list, and a missing guard is a hard error rather than a silent pass. Read its exit status precisely: it fails only on a leak — a denied path that reached the target. Positive controls are reported but do not gate the status, so a guard that blocks everything, including writes it should allow, still exits `0`. Read the report, not just the exit code.
+5. **Verify.** Runs `.mir/probe.py` against the generated guard. The probe derives its attacks from the manifest, so it tests your policy rather than a fixed list. It also reads `.claude/settings.json` and `settings.local.json` to confirm the hook is actually registered for every tool the guard covers — every other row invokes the guard directly, so a stale matcher would leave structured writes unguarded while all of them still blocked.
+
+   Four exit codes, and the difference between the last two matters:
+
+   | Code | Meaning |
+   |---|---|
+   | `0` | Clean. |
+   | `1` | **Leak.** A denied path reached the target — because the guard allowed it, or because the hook is not registered for the tool that would write it. |
+   | `2` | The probe could not run: no manifest, or no guard. Not a passing harness, an unchecked one. |
+   | `3` | **Inconclusive.** A positive control was blocked, the guard returned an unexpected code, or the wiring could not be confirmed. |
+
+   Exit `3` exists because a guard that blocks everything is not simply "too tight". When the positive control is blocked, every `BLOCK` row becomes uninformative — you can no longer tell "blocked because the policy denies it" from "blocked because the guard is broken". The positive control is the only discriminating row in the table, so a run that loses it proves nothing in either direction. Pass `--allow-false-blocks` if the over-tightening is deliberate; it never silences a leak. `mir init` passes the probe's code through rather than flattening every failure to `1`.
 
 ### Commands
 
@@ -484,20 +610,24 @@ python3 init/cli.py catalog                                         # print the 
 python3 .mir/probe.py --repo .                                      # re-check an existing harness
 ```
 
-`--noninteractive` fails on an ambiguous detection rather than guessing; pass `--answers` with an explicit choice. `--dry-run` writes nothing at all, including the probe step.
+`--noninteractive` no longer means "fail on ambiguity" — ambiguity is a hard stop in both modes, because it is the user's to resolve either way and the only thing a flag could change is whether mir admits it resolved it for them. The flag now only forbids prompting. `--answers` is the way forward, and deliberately the only one: there is no `--accept-detection`, because a "just guess" flag re-creates the defect behind a name that makes it sound approved.
+
+`--dry-run` writes nothing at all, including the probe step, and reports `REFUSED: …` for any destination the real run would decline.
 
 ### What it writes
 
 | File | What it is |
 |---|---|
 | `AGENTS.md` | The thin baseline: the pillars that apply here, the one hard rule, and the recorded stack. Never skill content. Anything below the ownership marker is preserved on re-run. |
-| `CLAUDE.md` | An `@AGENTS.md` import plus room for repository notes. |
+| `CLAUDE.md` | An `@AGENTS.md` import plus room for repository notes. Like `AGENTS.md`, anything below the ownership marker survives a re-run. Before `v1.0.1` it was rewritten whole despite that promise. |
 | `.mir/manifest.json` | The write policy: allowed roots, denied paths, the recorded stack, and the resolved skills. |
 | `.mir/guard.py` | The `PreToolUse` hook that enforces the manifest. It lives under `.mir/`, which is itself a denied path, so the agent cannot rewrite the guard to widen its own permissions. |
 | `.mir/probe.py` | The manifest-derived verifier, so anyone can re-check with `python3 .mir/probe.py --repo .`. |
 | `.claude/settings.json` | Registers the hook. Merged, not overwritten, so an existing hook set survives. |
 
-Re-running is idempotent: files above the ownership marker regenerate and your edits below it stay.
+Re-running is idempotent: files above the ownership marker regenerate and your edits below it stay. It also **reconciles** rather than merely detecting. If the hook's matcher or command has gone stale, it is rewritten to the current one instead of being left alone because the tag was present, and duplicate entries from older runs collapse to one. The marker is an address, not a flag — treating it as a flag is how a repository ends up with a registered hook that covers the wrong tools and a re-run that reports success while changing nothing.
+
+**Destination safety.** `mir init` inspects every destination before writing any of them, and refuses the whole run — exit `3`, nothing written — if one is a symlink, including a dangling one and including a symlinked parent directory; is not a regular file; is a `settings.json` it cannot parse; or is an `AGENTS.md` or `CLAUDE.md` carrying no mir ownership marker. Refused regular files are copied to `<name>.mir-backup` first; symlinks and device nodes are never read. Generation is all-or-nothing because a partial harness is worse than none — it looks installed.
 
 ### It is Claude Code only
 

@@ -282,7 +282,40 @@ leaked key does not.
 
 An adversarial review by `gpt-5.6-sol` at `xhigh` over the working tree. Six false claims
 it found in the new README were corrected before commit; D7 above was found the same way.
-These remain open, ranked. Line numbers refer to the state at that review.
+
+**All eleven were fixed on 2026-08-25.** The table below is kept as the record of what was
+wrong and why. Root-cause analysis first collapsed them into five causes plus one
+standalone, and the fixes were made against the causes rather than the symptoms:
+
+| Root cause | Findings it produced | The change |
+|---|---|---|
+| **A** — no canonical notion of path identity; every decision made lexically | 2, 9, D4 | One `canonical()` applied to **both sides** of every comparison. Deny runs on the union of lexical and canonical, allow on canonical only, so the deny predicate is provably monotone and nothing that blocked before can start allowing. |
+| **B** — idempotence implemented as presence-detection, never reconciliation | 3, 10, D2 | The ownership marker becomes an *address*, not a flag: locate the owned region, diff it against desired, rewrite in place, return `changed` from a real before/after comparison. |
+| **C** — `apply()` writes to a destination it has never inspected | 1, 6, 11 | One `inspect_destination()` precheck over every item before any byte lands, plus `O_NOFOLLOW` to close the TOCTOU gap between inspection and write. Refusal is all-or-nothing. |
+| **D** — every component exits green on a narrower question than the one asked | 4, 5, 3b, D3 | No component may exit 0 on a question it did not ask. The probe gains a wiring phase and exit 3; the CLI refuses undecided input; the guard reports version drift. |
+| **E** — the Bash parser models one command with one target | 8 | Segment-split, tokenise, per-verb destination extraction, unioned with the original regexes. |
+| standalone | 7 | One token: `.claude/settings.json` → `.claude/settings*.json`. The glob mechanism from `e1d4ce1` already covered it. |
+
+Test count went from 36 to **246**, green on Python 3.9.6 and 3.14.
+
+Two things worth recording because they nearly went wrong:
+
+- **Finding 7 could not land until the probe could instantiate an interior `*`.**
+  `denied_attack_paths(".claude/settings*.json")` returned `['.claude/settings*.json']` — a
+  literal path containing a star. Adding the pattern would have produced a probe that fired
+  at nonsense, blocked trivially, passed, and never once attacked `settings.local.json`.
+  That is D7 reproduced inside its own fix. The probe's glob expansion was fixed first, and
+  a permanent generalised assertion now covers the class: for every entry in
+  `BASELINE_DENIED`, `denied_attack_paths(entry)` must yield at least one metacharacter-free
+  path that is not byte-identical to the entry.
+- **Canonicalising naively would have turned the whole suite red while looking like a
+  security win.** `tempfile` returns `/var/folders/...` and `realpath` returns
+  `/private/var/folders/...`. Canonicalise the target but leave `find_repo_root` on
+  `abspath` and every write resolves outside its own root, so the guard blocks everything.
+  A control assertion now pins it, and the assertion checks that the two paths really do
+  differ, so it cannot silently become vacuous if macOS changes.
+
+Line numbers below refer to the state at the review.
 
 | # | Severity | Finding |
 |---|---|---|

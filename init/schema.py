@@ -41,7 +41,12 @@ MANIFEST_VERSION = 1
 BASELINE_DENIED = [
     ".git",                  # rewriting history / hooks is not a normal edit
     ".mir",                  # the policy, guard, and probe live here; must be self-protected
-    ".claude/settings.json", # the hook registration; an agent must not unregister the guard
+    # The hook registration; an agent must not unregister its own guard. A pattern, not the
+    # literal path, because Claude Code also reads settings.local.json and that file can
+    # carry PreToolUse hooks too -- denying only settings.json left the agent a second file
+    # to disarm itself through. Deliberately NOT `.claude`, which would deny .claude/skills
+    # and break `mir init --install`.
+    ".claude/settings*.json",
     # Every dotfile whose name starts with `.env`, at any depth: `.env`, `.env.local`,
     # `.env.production`, `src/.env`, `a/b/.env.development`. A secrets file has no fixed
     # location, so the literal prefixes this replaces only ever covered the repo root.
