@@ -127,8 +127,32 @@ def _alias_repo(tmp, name="repo"):
     return repo
 
 
+def _diverging_root(tmp):
+    """A directory whose realpath and abspath differ, by construction, on every platform.
+
+    macOS gets this divergence for free: tempfile.mkdtemp() hands back a /var/... path
+    whose realpath is /private/var/.... That accident is exactly the F2 trap -- canonicalise
+    the write TARGET but leave find_repo_root on abspath, and every write resolves outside
+    its own root while looking like a security win.
+
+    Linux's /tmp is ordinarily already canonical, so the same accident does not happen
+    there, and a control that checks for a macOS-specific rewrite is checking a platform
+    fact, not a property of the guard. Rather than make the control conditional on that
+    fact (and silently trust it on the platform where it doesn't hold), build the
+    divergence directly with a symlink layer: `link` and `real` are two different names for
+    the same directory, so abspath(path-through-link) and realpath(path-through-link)
+    necessarily disagree, on macOS and Linux alike. The guard cannot tell -- and must not
+    care -- whether the divergence came from the OS or from the fixture.
+    """
+    real = os.path.join(tmp, "canon-real")
+    os.makedirs(real, exist_ok=True)
+    link = os.path.join(tmp, "canon-link")
+    os.symlink(real, link)
+    return link
+
+
 def _f2(check, tmp):
-    repo = _alias_repo(tmp)
+    repo = _alias_repo(_diverging_root(tmp))
 
     rc, err = _write(repo, "src/alias")
     check("F2 alias: a symlink in an allowed root to the guard is BLOCKED",
@@ -144,19 +168,22 @@ def _f2(check, tmp):
     check("F2 alias: a symlink out of the repo is BLOCKED",
           rc == guard.BLOCK, f"rc={rc} err={err.strip()[-160:]}")
 
-    # THE CONTROL. tempfile hands back /var/... whose realpath is /private/var/..., so a
-    # canonical target measured against an abspath root is under nothing and the guard
-    # blocks everything while looking like a security win. If this check fails, the fix is
-    # worse than the bug.
-    check("F2 control: tempfile repo root canonicalises away from abspath (the trap is real)",
+    # THE CONTROL. `repo` is spelled through the `canon-link` symlink built by
+    # _diverging_root, so its realpath and abspath disagree on every platform, not just
+    # where a tempdir happens to canonicalise away from abspath. If this ever comes back
+    # equal, the fixture stopped constructing the trap and everything below is vacuous --
+    # the guard would look like it passed while never having been tested against a
+    # canonicalising root at all.
+    check("F2 control: repo root's realpath diverges from its abspath (the trap is real)",
           os.path.realpath(repo) != os.path.abspath(repo),
-          "no /private prefix on this platform; the control still has to pass")
+          f"repo={repo!r} realpath={os.path.realpath(repo)!r} -- divergence should be "
+          "guaranteed by the canon-link symlink regardless of platform")
     rc, err = _write(repo, "src/app.ts")
-    check("F2 control: an ordinary src/app.ts write in a tempfile repo is still ALLOWED",
-          rc == guard.ALLOW, f"rc={rc} err={err.strip()[-200:]}")
+    check("F2 control: an ordinary src/app.ts write in a canonicalising-root repo is still "
+          "ALLOWED", rc == guard.ALLOW, f"rc={rc} err={err.strip()[-200:]}")
     rc, err = _write(repo, os.path.join(repo, "tests", "t.spec.ts"))
-    check("F2 control: an ABSOLUTE /var-spelled target under an allowed root is ALLOWED",
-          rc == guard.ALLOW, f"rc={rc} err={err.strip()[-200:]}")
+    check("F2 control: an ABSOLUTE pre-canonicalisation-spelled target under an allowed "
+          "root is ALLOWED", rc == guard.ALLOW, f"rc={rc} err={err.strip()[-200:]}")
 
     # Same attack through Bash, because the parser and the resolver are separate holes.
     rc, err = _bash(repo, "echo pwned > src/alias")
