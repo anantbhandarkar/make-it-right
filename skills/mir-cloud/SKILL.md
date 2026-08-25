@@ -190,7 +190,7 @@ Write the decision and get sign-off **before any IaC**. Must state:
 
 End with: **"Approve this or tell me what to change. I won't write infrastructure code until you approve."**
 
-Then load the provider module — it carries that provider's service mechanics. **Only `mir-cloud-aws` is written.** `mir-cloud-gcp`, `mir-cloud-azure` and `mir-cloud-cloudflare` sit on the repo's planned-not-written list, the one `validate.py` reads — do not try to load them, because a name that does not resolve loads nothing and says nothing. If the chosen provider is one of those three, run this pillar alone and **record in the design that module-level mechanics were unavailable**, so the gap is a stated limitation rather than a silent one.
+Then load the provider module — it carries that provider's service mechanics: `mir-cloud-aws`, `mir-cloud-gcp`, `mir-cloud-azure`, or `mir-cloud-cloudflare`, matching whichever provider Gate 5 chose.
 
 </gate5>
 
@@ -316,13 +316,13 @@ Most real systems are **several workloads with several answers** — an API, a m
 ## Composing with your other skills
 
 - **mir-backend / mir-frontend**: this pillar decides *where* it runs; those decide *what the code must do*. Run this first when the platform is undecided, then hand off. With **anant-plan / GSD**, run it inside the phase's planning — it produces the ledger, the elimination record, and the cost model the phase plan should cite.
-- **Provider module** (2-tier chain): this skill is provider-neutral. The provider modules carry each provider's service mechanics: `mir-cloud-aws` is written; `mir-cloud-gcp`, `mir-cloud-azure` and `mir-cloud-cloudflare` are planned and not written. Load the module at Gate 5, not before — loading it early biases the choice.
+- **Provider module** (2-tier chain): this skill is provider-neutral. The provider modules carry each provider's service mechanics: `mir-cloud-aws`, `mir-cloud-gcp`, `mir-cloud-azure`, and `mir-cloud-cloudflare`. Load the module at Gate 5, not before — loading it early biases the choice.
 
 ## Where these instructions live (edit map)
 
 > **"Is this true regardless of provider?"** → **generic** (edit `skills/mir-cloud/SKILL.md` + its two references) — the gates, the characterization inputs, the egress discipline, the exit-cost rule.
-> **"Does it only bite on one provider?"** → **provider module** — service names, quotas, console defaults, that provider's IAM model. Today that means `skills/mir-cloud-aws/`; `mir-cloud-gcp`, `mir-cloud-azure` and `mir-cloud-cloudflare` are named here and in Gate 5 but not yet written, so a fact belonging to one of them has nowhere to go until it is.
-> **New provider?** → new `mir-cloud-<provider>` module, and delete its slug from the planned-not-written list `validate.py` reads, in the same commit. Copy `mir-cloud-aws`'s shape; never widen this one. Gate 7 review focus changes go in `agents/*.md`.
+> **"Does it only bite on one provider?"** → **provider module** — service names, quotas, console defaults, that provider's IAM model. `skills/mir-cloud-aws/`, `skills/mir-cloud-gcp/`, `skills/mir-cloud-azure/`, and `skills/mir-cloud-cloudflare/` each carry their own.
+> **New provider?** → new `mir-cloud-<provider>` module, and remove its slug from the planned-not-written list `validate.py` reads, in the same commit. Copy `mir-cloud-aws`'s shape; never widen this one. Gate 7 review focus changes go in `agents/*.md`.
 
 ## References
 

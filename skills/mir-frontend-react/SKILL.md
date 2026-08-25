@@ -1,6 +1,6 @@
 ---
 name: mir-frontend-react
-description: "Make It Right (React reactivity tier). React 19 + React Compiler reactivity footguns shared across EVERY React meta-framework (Next.js, React Router 7/Remix, TanStack Start, Vite SPA) — distinct from the generic frontend gates and from any one framework's mechanics. Covers the Rules of Hooks, effect-dependency discipline (derive in render; effects are for external sync only), stale closures, list-key correctness, use() and promise identity, granular Suspense + Error Boundary placement, useTransition/useDeferredValue for INP, React Compiler 1.0 interop (blind useMemo/useCallback is now a liability; the 'use no memo' opt-out), the server-state-vs-client-state boundary (TanStack Query, not useState mirrors), and React-layer security (raw-HTML props, LLM-output rendering, secrets in the bundle). Chains: mir-frontend → this → mir-frontend-react-next. TRIGGER when the reactivity library is React, including React Server Components — render purity, promise identity and Suspense placement apply on the server too. SKIP for Vue (mir-frontend-vue), Angular (mir-frontend-angular), Svelte, and plain-DOM work (mir-frontend-vanilla). SKIP for Next.js mechanics — RSC boundary wiring, Server Actions, file routing, framework caching and middleware belong to mir-frontend-react-next. SKIP for backend code (mir-backend)."
+description: "Make It Right (React reactivity tier). React 19 + React Compiler reactivity footguns shared across EVERY React meta-framework (Next.js, React Router 7/8 Framework Mode, TanStack Start, Vite SPA) — distinct from the generic frontend gates and from any one framework's mechanics. Covers the Rules of Hooks, effect-dependency discipline (derive in render; effects are for external sync only), stale closures, list-key correctness, use() and promise identity, granular Suspense + Error Boundary placement, useTransition/useDeferredValue for INP, React Compiler 1.0 interop (blind useMemo/useCallback is now a liability; the 'use no memo' opt-out), the server-state-vs-client-state boundary (TanStack Query, not useState mirrors), and React-layer security (raw-HTML props, LLM-output rendering, secrets in the bundle). Chains: mir-frontend → this → mir-frontend-react-next or mir-frontend-react-remix. TRIGGER when the reactivity library is React, including React Server Components — render purity, promise identity and Suspense placement apply on the server too. SKIP for Vue (mir-frontend-vue), Angular (mir-frontend-angular), Svelte, and plain-DOM work (mir-frontend-vanilla). SKIP for Next.js (mir-frontend-react-next) or React Router 7/8 Framework Mode (mir-frontend-react-remix) mechanics — RSC boundary, Server Actions, file routing, loaders/actions, middleware belong to the framework module. SKIP for backend code (mir-backend)."
 trigger: /mir-frontend-react
 argument-hint: "<task or files>"
 allowed-tools:
@@ -16,7 +16,7 @@ allowed-tools:
 
 Middle tier. `mir-frontend` decides **what is correct** (any reactive UI); this owns **React's reactivity model**, shared by all React meta-frameworks; the framework module knows the library's mechanics. Load order: `mir-frontend` → `mir-frontend-react` → `<framework module>`.
 
-These footguns apply equally to Next.js, React Router 7 (Framework Mode), TanStack Start, and a Vite SPA. Framework-specific wiring (RSC boundary, Server Actions, hydration, file-based routing, framework caching) lives in the framework module — not here.
+These footguns apply equally to Next.js, React Router 7/8 (Framework Mode), TanStack Start, and a Vite SPA. Framework-specific wiring (RSC boundary, Server Actions, hydration, file-based routing, framework caching) lives in the framework module — not here.
 
 ## Version floor (checked against the npm registry and react.dev, 13 Aug 2026)
 
@@ -296,7 +296,7 @@ Because Effects unmount when a subtree goes hidden, any cleanup you skipped show
 
 ## Security
 
-React-layer mechanics. Server-side authorization, CORS, and rate limiting belong to `mir-backend`; RSC boundary rules, Server Action argument validation, and framework middleware belong to `mir-frontend-react-next`.
+React-layer mechanics. Server-side authorization, CORS, and rate limiting belong to `mir-backend`; RSC boundary rules, Server Action argument validation, and framework middleware belong to `mir-frontend-react-next` or `mir-frontend-react-remix`.
 
 ### The raw-HTML sinks React does not protect
 
@@ -385,8 +385,8 @@ If the app renders React Server Components or Server Functions, `react-server-do
 **The 4-question placement test:**
 
 1. True for Vue, Angular, and Svelte too (any reactive UI library)? → **up** to `mir-frontend`.
-2. True for every React meta-framework (Next.js, React Router 7, TanStack Start, Vite SPA) because they all run React's reactivity model? → **here**.
-3. Specific to one meta-framework's mechanics (RSC boundary, Server Actions, file-based routing, framework caching, hydration wiring, `generateMetadata`)? → **down** to `mir-frontend-react-next` or the equivalent module.
+2. True for every React meta-framework (Next.js, React Router 7/8, TanStack Start, Vite SPA) because they all run React's reactivity model? → **here**.
+3. Specific to one meta-framework's mechanics (RSC boundary, Server Actions, file-based routing, framework caching, hydration wiring, `generateMetadata`)? → **down** to `mir-frontend-react-next`, `mir-frontend-react-remix`, or the equivalent module.
 4. Different reactivity library (Vue, Angular, Svelte)? → its own `mir-frontend-<lib>` tier. Never widen this one.
 
 Cross-ref: full edit map is in `mir-frontend/SKILL.md` → "Where these instructions live."

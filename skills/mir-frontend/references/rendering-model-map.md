@@ -27,11 +27,11 @@ A mismatch isn't an automatic blocker — the team may have valid reasons (exist
 
 ## Table 2 — reactivity-tier fitness
 
-Independent of the rendering model above. This picks which `mir-frontend-<lib>` tier loads at Gate 5. Versions checked against the npm registry on 13 Aug 2026.
+Independent of the rendering model above. This picks which `mir-frontend-<lib>` tier loads at Gate 5. Versions checked against the npm registry on 13 Aug 2026; the React and Vite rows re-checked 25 Aug 2026.
 
 | Tier | Current stable | Use when… | Do NOT use when… |
 |---|---|---|---|
-| **React** — `mir-frontend-react` | react 19.2.8; babel-plugin-react-compiler 1.0.0 | Greenfield with no existing Vue/Angular investment; you need RSC, Actions, or the widest meta-framework choice (Next.js 16.3.0, react-router 8.3.0, @tanstack/react-start 1.168.44, Vite SPA); the team is already hiring against it | The page is mostly static content with one interactive widget — you are shipping a runtime to do a script's job; the team has no React experience and the app is small |
+| **React** — `mir-frontend-react` | react 19.2.8; babel-plugin-react-compiler 1.0.0 | Greenfield with no existing Vue/Angular investment; you need RSC, Actions, or the widest meta-framework choice (Next.js 16.3.0, react-router 8.3.0 — still current on 25 Aug 2026, and note v8 marked React Router 6 and Remix v2 End of Life, @tanstack/react-start 1.168.44, Vite SPA); the team is already hiring against it | The page is mostly static content with one interactive widget — you are shipping a runtime to do a script's job; the team has no React experience and the app is small |
 | **Vue 3** — `mir-frontend-vue` | vue 3.5.41; nuxt 4.5.2 | The team knows Vue; you want reactivity adopted gradually into an existing server-rendered HTML codebase; SFCs and the template compiler fit the work | You need React-only ecosystem pieces (RSC, a React-only component library) with no Vue equivalent; the app is one widget (go vanilla) |
 | **No framework** — `mir-frontend-vanilla` | platform only — see that skill's Baseline table | A widget embedded in someone else's page (their globals, their CSP, their prototypes); a design-system primitive or custom element meant to work under every framework; a browser-extension content script; a static site with one script; a bundle budget a framework runtime cannot fit inside | **Any app with more than a handful of interdependent states.** There is no render loop and no automatic teardown: every listener, observer, timer, and DOM write is yours to undo, and every state change is yours to reflect by hand. Also do not go framework-free for: forms with cross-field validation, routed multi-screen apps, anything server-rendered and hydrated, or lists that reorder and filter. What gets built instead is an in-house reactivity system with no docs, no tests, and one person who understands it |
 | **Angular** — `mir-frontend-angular` | @angular/core 22.1.3; @angular/cli 22.1.5 (25 Aug 2026) | Large enterprise codebases that benefit from one opinionated stack (CLI, DI, forms, router, SSR in one); you want signals with a compiler and a batteries-included migration path | You want a thin runtime for one widget; you are on v19 or below and cannot upgrade — those majors are EOL and no longer receive security fixes |
@@ -44,7 +44,8 @@ For **Svelte and Solid** there is no reactivity tier yet. Run the `mir-frontend`
 ## Naming reminder
 
 - Reactivity tier: `mir-frontend-<lib>` — **written:** `mir-frontend-react`, `mir-frontend-vue`, `mir-frontend-angular`, `mir-frontend-vanilla`.
-- Framework module: `mir-frontend-<lib>-<framework>` — **written:** `mir-frontend-react-next`, `mir-frontend-vue-nuxt`.
-- **Planned, not written, not loadable:** `mir-frontend-react-remix` (React Router / Remix). It is on the repo's planned-not-written list; `validate.py` downgrades a reference to it from an error to a warning so the gap stays visible.
+- Framework module: `mir-frontend-<lib>-<framework>` — **written:** `mir-frontend-react-next`, `mir-frontend-react-remix`, `mir-frontend-vue-nuxt`.
+- `mir-frontend-react-remix` covers **React Router 7/8 in Framework Mode** and Remix v2. The directory keeps the `remix` slug for historical reasons; the description leads with "React Router". React Router's Declarative Mode (`<BrowserRouter>`) and Data Mode (`createBrowserRouter`) get the pillar plus `mir-frontend-react` — most of that module is Framework-Mode-only material.
+- **Remix 3 is a different product**, not a React meta-framework: it replaces React with a forked Preact. No tier and no module covers it — run the `mir-frontend` gates alone and say so in the design.
 - No module exists yet for TanStack Start, a Vite React SPA, Quasar, a Vite Vue SPA, or AnalogJS. Those stacks get the pillar plus the tier. For Angular that is the intended end state, not a gap: `mir-frontend-angular` already carries the framework layer.
 - Add more via the recipe in `EXTENDING.md`.

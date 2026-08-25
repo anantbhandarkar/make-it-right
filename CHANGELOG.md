@@ -20,6 +20,226 @@ holds the current version as one line with no `v` prefix; the `v` belongs to the
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-08-25
+
+`mir init` emits a real write-policy harness for Codex and Antigravity, not only for Claude
+Code, and Cursor is documented as conditional rather than supported. That is what the
+manifest bump pays for: a harness had nowhere to record *which* hosts it was generated for,
+and the probe was reading that from whoever last typed a flag. Also here: the six deferred
+skills, which empties `.mir-planned` for the first time; 15 generated Mermaid diagrams; and
+a probe that reads each host's own verdict channel instead of assuming Claude Code's. Scope,
+and what was deliberately kept out of it, is in `GOAL.md`.
+
+Measured on this tree, not quoted from a commit message: `./validate.py` reports **52 skills
+(7 pillars, 22 tiers, 23 modules) · 6 reviewers · 0 planned · 15 diagrams — 0 errors, 4
+warnings**, and `python3 init/test_init.py` reports **820 passed, 0 failed**.
+
+If you are on the `v1.0.0` tag, read the `[1.1.0]` entry below as well. It is dated, but no
+`v1.1.0` tag exists in this repository, so `v1.0.0` → `v2.0.0` is the only upgrade anyone
+actually walks and it carries both entries' changes at once.
+
+### Breaking
+
+- **`schema.MANIFEST_VERSION` 1 → 2.** Every existing `.mir/manifest.json` now predates the
+  schema. The guard warns on stderr and ALLOWS every write unchecked, on every protocol,
+  until you re-run `mir init`. Failing open here is the deliberate choice and it is the
+  worse-sounding half of a pair: `.mir/guard.py` is a frozen copy inside your repository, it
+  cannot know what a newer manifest means, and refusing every write would brick the agent in
+  a project whose policy is perfectly valid. The probe is where the mismatch fails closed —
+  it now parses the guard's `GUARD_MANIFEST_VERSION` out of the guard's own source and exits
+  1 on drift, naming `mir init`. Until you run either one, you have a harness that reports
+  present and enforces nothing.
+- **`validate_manifest` still accepts a v1 manifest**, and that is where the break bites
+  rather than a softening of it. Rejecting v1 would turn "your harness is stale, regenerate
+  it" into "your harness is malformed", which sends the reader to the wrong repair.
+- **`.mir/guard.py` requires `--protocol <claude|codex|antigravity|cursor>`.** A missing or
+  unknown value is a hard error, exit 3, and never a default to `claude`. Defaulting is
+  precisely how a mis-wired Codex hook runs the Claude parser, finds no recognisable fields,
+  extracts zero write targets, and allows every write while reporting clean. See "Upgrading":
+  a registration written by mir 1.x carries the v1 command, and exit 3 does not block.
+- **The manifest carries a `targets` block, and the probe reads the declared set from it**
+  rather than from its own flags — so a target cannot be dropped from verification by
+  re-running the probe with narrower arguments than the run that installed the harness. A
+  declared target whose wiring file has been deleted makes the probe exit 1, not skip.
+- **`schema.BASELINE_DENIED` gains repo-local `.codex` and `.agents`** (both wholesale) and
+  `~/.gemini`. Cross-agent init hands the agent two more files it could disarm itself
+  through. If your project legitimately has the agent edit `.agents/` or `.codex/`, those
+  writes now block. `mir init` can still write `.agents/hooks.json`, because the generator
+  runs outside the agent's tool loop.
+- **`validate.py`'s `DIA001` is an error, not a warning**, so a stale generated diagram
+  blocks installation through the gate `install.sh` already had. A fork that carries the
+  managed `mir:gen:` blocks and edits the skill tree must now regenerate them, or
+  `./install.sh` refuses to install for everyone.
+
+### Added
+
+- **Cross-agent `mir init`.** `--target claude|codex|antigravity|cursor|all` writes
+  `.claude/settings.json`, `.codex/hooks.json`, and `.agents/hooks.json` respectively.
+  `--target cursor` writes **no** enforcement file, by design: Cursor reads Claude Code's
+  configuration and honours exit code 2 behind the user-level *Include third-party Plugins,
+  Skills, and other configs* toggle, so it names that toggle in its output instead. Emitting
+  a Cursor-specific file nothing reads is how Antigravity support shipped broken for months.
+- `init/targets/`, one module per host, over an untouched policy engine — `decide`,
+  `resolve`, `_is_under`, `canonical`, `find_repo_root` and `load_manifest` are
+  byte-identical, because they were already target-neutral and correct. What is new is
+  `--protocol` dispatch over event parsing and verdict emission only. Every target must fill
+  a frozen `Capability` table with all four keys (`skills`, `subagents`,
+  `always_on_context`, `write_policy_enforcement`), each with a `level`, a `mechanism` and a
+  `source`; the `KeyError` is the test, and the package raises at import time on a malformed
+  table, so a fifth target added later fails the process that loaded it rather than the
+  report that rendered it. A new host has to *state* its enforcement level rather than
+  inherit silence.
+- **The Antigravity adapter is fail-closed by construction** — top-level catch, unloadable
+  policy and unparseable event both deny — because the *host* is fail-open: a hook that
+  exits non-zero or carries an uncompilable matcher is logged and skipped, and the write
+  proceeds. That is the opposite posture from the Claude adapter, and the difference is
+  stated in the target rather than inherited by accident. It blocks with deny-JSON on stdout
+  at exit 0, since the host ignores exit codes, and prints allow-JSON too, because empty
+  stdout is not an allow. Its matcher is `*` rather than an enumerated list: the binary also
+  ships `sed_file`, `notebook_edit`, a `delete_file` proto field, and arbitrary MCP tools via
+  `call_mcp_tool`, so naming three is a hole.
+- **Codex `apply_patch` parsing** covering `Add`, `Update`, `Delete` and `Move to` — a rename
+  lands bytes at a path the first header never named — unioned with the ordinary parse rather
+  than replacing it, so a heredoc patch with innocent headers is still blocked for a redirect
+  sitting beside it. An unparseable body **denies**. It does not return `ask`: Codex treats
+  `ask` as unsupported and continues past it, so `ask` is fail-open wearing a cautious name.
+- `.mir/COVERAGE.md`, written by `mir init` beside the guard. It opens with a verdict block
+  rather than a table, because the first thing a reader needs is which targets are enforced
+  and which are merely emitted. Every target × capability row carries what the probe proved
+  and, separately, what it did **not** prove, and the four claims no command in this
+  repository can check are listed with their procedure and their owner — so a green probe run
+  is not read as covering them.
+- `init/agents_export.py`, deriving each host's sub-agent export from `agents/*.md`
+  frontmatter rather than a checked-in parallel catalog. Its `LOSSY_FIELDS` surfaces in
+  `COVERAGE.md`: Codex sub-agent TOML has no `tools:` equivalent, so the reviewers'
+  read-only restriction is a real loss, printed rather than dropped.
+- **Six skills: `mir-cloud-aws`, `mir-cloud-gcp`, `mir-cloud-azure`,
+  `mir-cloud-cloudflare`, `mir-frontend-angular`, `mir-frontend-react-remix`.** The tree goes
+  46 → 52 and **the planned-not-written list is empty for the first time** — `.mir-planned`
+  holds only its own instructions, and `validate.py` reports 0 planned. Angular was the only
+  stack where the kit admitted in so many words that it had nothing: `mir-frontend` told the
+  model to run the pillar alone and record that a tier was unavailable, so an Angular user
+  got 1 of 3 layers where everyone else got 2 or 3. `mir-cloud-aws` deliberately ships no CVE
+  table and says why — cloud-provider vulnerabilities are overwhelmingly mitigated
+  server-side with no customer action, so citing them produces a table an engineer cannot act
+  on.
+  **How the diagrams render on GitHub is unverified.** No browser ran at any point in this
+  release. GitHub does not document its pinned Mermaid version and trails upstream, so the
+  blocks target 10.x by documentation rather than observation, and the light and dark themes
+  have never been looked at. Everything mechanically checkable is checked — the subset each
+  line uses, that no block sets a theme, that every styled node sets `fill`, `stroke` and
+  `color` together, that colour is never the only carrier — but "it parses and the contrast
+  ratios compute" is not "it reads correctly". Check both themes before relying on them.
+
+- **15 generated Mermaid blocks**, produced by `docs/gen_diagrams.py` from `init/catalog.py`
+  and reimplementing none of it, so the derived diagrams were correct at 46 skills and are
+  correct at 52. `validate.py` gains `DIA001`–`DIA004` (see "Breaking" for `DIA001`). Every
+  block ships three things from one data structure so they cannot disagree: the Mermaid
+  source with `accTitle`/`accDescr`, a `<details>` text version, and a link list — Mermaid
+  conveys no node relationships to assistive technology, and the README is also read in
+  `less`, on mirrors, and in agent context windows where Mermaid never renders. The generator
+  carries no clock and no hash, which is the constraint the whole mechanism rests on: a
+  generator that copied `generate.py`'s `generated_at` habit would fail `--check` on every
+  run for the wrong reason.
+- `docs/skill-tree.md` — the full inventory, moved out of the README.
+- **A probe that asks each host its own question.** `read_verdict` decides per protocol, and
+  on the stdout channel the exit code is not consulted at all: an adapter that exits 2 and
+  prints nothing is `GUARD-ERROR`, not `BLOCK`. Empty stdout, unparseable stdout, a missing
+  or unrecognised decision, and `ask` are all `GUARD-ERROR`, never `ALLOW`, and an unknown
+  protocol gets the stricter stdout reader so a fifth target cannot inherit Claude's
+  semantics by silence. The wiring phase now reads the registered **command**, not only the
+  matcher — see "Upgrading" for why a correct matcher over a v1 command is the exact shape of
+  a harness that reports wired and enforces nothing. It also carries a real manifest-version
+  check (`guard.py` had claimed "a version mismatch fails closed — the probe owns that" while
+  `probe.py` contained no reference to `mir_manifest_version` at all), Bash attacks per verb
+  family (`redirect`, `tee`, `dd`, `cp`) bounded linearly in `denied_paths` rather than one
+  redirect shape for everything, and derived sibling controls — `.gitignore` against `.git`,
+  expected ALLOW — so replacing `_is_under` with a bare `startswith` yields exit 3 instead of
+  a report that is greener for having stopped discriminating.
+
+### Changed
+
+- **The generated `AGENTS.md` stops claiming Claude Code unconditionally.** It names the
+  enforcing targets, and when any target is advisory or unverified it says so in the same
+  breath. It stays thin — no hook JSON, no TOML — and is tested against 12,000 characters,
+  Antigravity's per-rule-file cap, which is tighter than the figure `EXTENDING.md` cites and
+  is therefore the binding one.
+- `mir init`'s hook-entry recognition matches on the **guard path** rather than the whole
+  command string. Without that, every untagged pre-`--protocol` v1 entry would stop being
+  recognised the day the flag landed, and `mir init` would append a second entry beside the
+  dead one instead of rewriting it.
+- The README is shorter and no longer says Claude-Code-only anywhere; "Tool support at a
+  glance" reads **conditional** for Cursor rather than yes or no, because a harness that is
+  present and inert is harder to document honestly than one that is absent.
+
+### Fixed
+
+- **Codex got zero skills for its entire history.** `install_codex()` linked only `AGENTS.md`
+  and told users to register skills through `/skills` — an instruction that could never work,
+  because `/skills` only toggles skills already discovered from a root, so `mir-backend` was
+  never there to select. The install path was established by probing rather than by reading
+  docs: uniquely-named skills were planted in five candidate locations and `codex debug
+  prompt-input` was used to see which the model actually receives. `$CODEX_HOME/skills` is
+  the one chosen, because it honours the `CODEX_HOME` override `install.sh` already
+  documents, and because `~/.agents` is a shared cross-tool directory other installers write
+  into. Codex now receives the whole tree and honours `--scope=pillars`. Reviewer agents were
+  probed the same way in four candidate directories and appeared in **none**, so mir installs
+  nothing there and a test asserts `.codex/agents` is not created — an unverified guess is
+  exactly how the Antigravity install target shipped broken.
+- Three fixes reach a tagged release for the first time here, documented in full in the
+  `[1.1.0]` entry below rather than restated: `install.sh` linked Antigravity skills into a
+  directory neither shipped product reads; secrets were denied by three literal paths, so
+  `src/.env` was writable while `skills/mir-init/SKILL.md` promised it was blocked; and
+  eleven findings from an adversarial review were fixed at five root causes, each with a
+  mutation test that reverts the fix and asserts the suite goes red.
+
+### Security
+
+- **Codex and Antigravity write-policy enforcement is `unverified`, and both targets say so
+  in `COVERAGE.md`.** The hook file is emitted and the adapter is tested against synthesised
+  events, but **no command in this repository proves either host invokes it**. Whether Codex
+  requires per-hook trust approval for a repo-local `.codex/hooks.json`, whether Antigravity
+  actually reads `.agents/hooks.json` and honours the deny, and whether Antigravity sub-agent
+  tool calls route through the same wrapper are three of the four claims listed in
+  `COVERAGE.md` with a manual procedure and a named owner. Until a maintainer runs them, do
+  not treat a green probe run on those two targets as enforcement. Claude Code is `enforced`;
+  Cursor is `advisory` and conditional on the toggle above, which is a fourth unrun
+  procedure.
+- `BASELINE_DENIED` gains repo-local `.codex` and `.agents` — see "Breaking". `~/.gemini` is
+  added too and is honestly worth less: like every `~/`-rooted entry it is deny-by-default by
+  the probe's own labelling, so it buys a row that cannot fail. It is a real denial, not
+  coverage of itself, and the probe labels it that way rather than counting it.
+
+### Upgrading
+
+- **Re-run `mir init` in every project that has a `.mir/` directory.** Until you do, the
+  guard prints a version-mismatch warning on stderr and allows every write unchecked; nothing
+  is enforced. `mir` has no `doctor` command yet, so there is no command that will tell you
+  which of your projects are in this state — a `.mir/manifest.json` whose
+  `mir_manifest_version` is `1` is the whole test.
+- **`.mir/guard.py` now requires `--protocol <claude|codex|antigravity|cursor>`.** A
+  registration written by mir 1.x carries the v1 command with no flag; that guard exits 3 on
+  every call and only exit 2 blocks, so the harness is fail-open with a matcher that still
+  looks correct. Re-run `mir init` to rewrite the registration. A running Claude Code session
+  holds the cached v1 command until you restart it — so the upgrade is two-phase whether or
+  not you notice: regenerate, **then** restart the session, and until both have happened the
+  repo is unguarded no matter what the settings file says.
+- Run `.mir/probe.py` afterwards and read the wiring phase, not just the attack count. It now
+  compares the registered command, so the case above shows up as a command row rather than a
+  green matcher row over a dead hook.
+- If you install for Codex or Antigravity, run `./install.sh --tool=codex` /
+  `--tool=antigravity` again. The Codex skill path and the Antigravity skill path both moved
+  (see "Fixed" and the `[1.1.0]` entry); the old locations are directories nothing reads.
+  `./install.sh --prune --dry-run` shows what the old targets left behind under `$HOME`.
+- If you use Cursor, enable *Include third-party Plugins, Skills, and other configs*. Nothing
+  in the harness can turn it on for you, and with it off the guard is present and inert.
+- If anything in your project has the agent write to `.agents/` or `.codex/`, those writes
+  are now denied. Move the work outside the agent's tool loop, or drop the entry from
+  `denied_paths` in your manifest and accept that the agent can unregister its own guard.
+- If your fork carries the generated `mir:gen:` diagram blocks, run
+  `python3 docs/gen_diagrams.py --check` before `./install.sh`. A stale block is now
+  `DIA001`, an error, and `install.sh` refuses to install a tree with errors.
+
 ## [1.1.0] - 2026-08-25
 
 Release engineering: a version file, a changelog, CI that has never existed before, and the

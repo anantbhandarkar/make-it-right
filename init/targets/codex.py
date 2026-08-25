@@ -72,12 +72,22 @@ class CodexTarget(Target):
     summary = "Codex: PreToolUse hook in .codex/hooks.json, blocks on exit 2"
 
     capabilities = {
+        # This claim was wrong until 2026-08-25 and the correction is worth keeping: it
+        # said Codex had no directory that scans for skills, which install.sh falsifies on
+        # the line above install_skills_to. A capability table that contradicts the
+        # installer prints a false row into COVERAGE.md, and COVERAGE.md is the one
+        # artifact whose whole job is to be believed.
         "skills": Capability(
-            level="advisory",
-            mechanism="install.sh --tool=codex prints a NOTE; there is no symlink target "
-                      "Codex scans for skill directories",
-            source="https://developers.openai.com/codex/",
-            caveats=("skills are not installed for Codex; the agent reads AGENTS.md only",),
+            level="enforced",
+            mechanism="install.sh --tool=codex symlinks every skill into $CODEX_HOME/skills "
+                      "(default ~/.codex/skills), a real USER-scope discovery root",
+            # OpenAI's own bundled skill-installer documents the same path, and a probe with
+            # `codex debug prompt-input` against codex-cli 0.147.0 found planted skills
+            # there in the rendered prompt. `/skills` only TOGGLES already-discovered
+            # skills, so the old "register them yourself" note could never have worked.
+            source="~/.codex/skills/.system/skill-installer/SKILL.md; codex-cli 0.147.0 probe",
+            caveats=("verified on codex-cli 0.147.0 on macOS only; the roots could differ on "
+                     "another version or platform",),
         ),
         "subagents": Capability(
             level="none",
