@@ -20,6 +20,7 @@ deliberate rather than silently rotting into a broken chain.
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import re
 import sys
@@ -30,6 +31,7 @@ ROOT = Path(__file__).resolve().parent
 SKILLS = ROOT / "skills"
 AGENTS = ROOT / "agents"
 PLANNED_FILE = ROOT / ".mir-planned"
+GEN_DIAGRAMS = ROOT / "docs" / "gen_diagrams.py"
 
 # A skill reference in prose. Trailing '-' means it was a <placeholder> such as
 # mir-backend-<runtime>, which is documentation, not a reference.
@@ -138,6 +140,63 @@ def check_chain(slug: str, known: set[str], planned: set[str], problems: list[Pr
             problems.append(Problem("error", slug, "CHN001", f"parent tier '{parent}' does not exist — this skill's chain is broken"))
 
 
+def check_diagrams(problems: list[Problem]) -> int:
+    """Re-derive every `mir:gen` diagram block and report what disagrees. Returns the count.
+
+    The whole point of putting this in validate.py rather than in a standalone script is the
+    enforcement chain that already exists and costs nothing to reuse: install.sh runs
+    `validate.py --quiet` and refuses to install on any error, so DIA001 being an error means
+    a stale diagram blocks installation. No new plumbing, no new CI step, no new habit to
+    remember.
+
+    The generator is loaded with importlib rather than subprocess: in-process, stdlib, no
+    interpreter start-up per run, and -- the reason that actually matters -- an ImportError
+    surfaces here as a message instead of as an opaque non-zero exit code. It is wrapped so
+    that a DELETED or broken generator is LOUD. A diagram checker that silently passes when
+    its generator is missing is worse than no checker, because every block in the tree then
+    reads as verified and none of them are.
+    """
+    if not GEN_DIAGRAMS.exists():
+        problems.append(Problem("error", "docs/gen_diagrams.py", "DIA001",
+                                "the diagram generator is missing, so no mir:gen block in this "
+                                "repo can be verified — restore it or delete the blocks"))
+        return 0
+    try:
+        spec = importlib.util.spec_from_file_location("mir_gen_diagrams", GEN_DIAGRAMS)
+        gen = importlib.util.module_from_spec(spec)
+        # Registered BEFORE exec_module, which is the documented recipe and not optional
+        # here: @dataclass resolves a string annotation via sys.modules[cls.__module__], so
+        # a module executed while absent from sys.modules dies on its first dataclass with
+        # an AttributeError that says nothing about the real cause.
+        sys.modules[spec.name] = gen
+        spec.loader.exec_module(gen)
+        report = gen.check_all()
+    except Exception as e:                                  # noqa: BLE001 - deliberately broad
+        # Broad on purpose. Any failure to run the generator means every block is unverified,
+        # and which exception it was does not change that verdict -- only the message.
+        problems.append(Problem("error", "docs/gen_diagrams.py", "DIA001",
+                                f"the diagram generator did not run ({e.__class__.__name__}: "
+                                f"{e}), so no mir:gen block could be verified"))
+        return 0
+
+    for rel, line, msg in report["markers"]:
+        problems.append(Problem("error", rel, "DIA002", f"line {line}: {msg}"))
+    for rel, did, _diff in report["drift"]:
+        problems.append(Problem("error", rel, "DIA001",
+                                f"the committed block id={did} is not what the generator "
+                                f"produces from the current tree — run "
+                                f"`python3 docs/gen_diagrams.py --write` (use --check for the diff)"))
+    for did, n in report["oversize"]:
+        problems.append(Problem("warn", did, "DIA003",
+                                f"diagram has {n} nodes, over SOFT_NODES={gen.SOFT_NODES}; "
+                                f"past this it stops being readable on a narrow screen"))
+    for did in report["unembedded"]:
+        problems.append(Problem("warn", did, "DIA004",
+                                "the generator produces this diagram but no document embeds "
+                                "it — it will never be seen"))
+    return len(report["ids"])
+
+
 def validate() -> tuple[list[Problem], dict]:
     problems: list[Problem] = []
 
@@ -238,6 +297,11 @@ def validate() -> tuple[list[Problem], dict]:
     for slug in planned_but_present:
         problems.append(Problem("warn", slug, "PLN001", "listed in .mir-planned but now exists — remove it from that file"))
 
+    # -- generated diagrams (DIA family) -------------------------------------
+    # Beside REF004/PLN001 because it is the same kind of check: cross-cutting, about the
+    # repository rather than about one skill, and only answerable once the whole tree is read.
+    n_diagrams = check_diagrams(problems)
+
     stats = {
         "skills": len(skills),
         "pillars": sum(1 for s in skills if s.slug.count("-") == 1),
@@ -245,6 +309,7 @@ def validate() -> tuple[list[Problem], dict]:
         "modules": sum(1 for s in skills if s.slug.count("-") >= 3),
         "reviewers": len(agent_names),
         "planned": len(planned),
+        "diagrams": n_diagrams,
         "errors": sum(1 for p in problems if p.level == "error"),
         "warnings": sum(1 for p in problems if p.level == "warn"),
     }
@@ -276,7 +341,8 @@ def main() -> int:
         print()
         print(f"{stats['skills']} skills  "
               f"({stats['pillars']} pillars, {stats['tiers']} tiers, {stats['modules']} modules)  "
-              f"· {stats['reviewers']} reviewers · {stats['planned']} planned")
+              f"· {stats['reviewers']} reviewers · {stats['planned']} planned "
+              f"· {stats['diagrams']} diagrams")
     print(f"{stats['errors']} errors, {stats['warnings']} warnings")
     return 1 if errors else 0
 

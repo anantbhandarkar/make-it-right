@@ -62,7 +62,18 @@ jobs:
           # a fresh warning under the same total -- see docs/v2-plan.md's "Residual hole
           # worth naming and not fixing" for why that's an accepted, named gap rather than
           # a silent one.
-          BUDGET = 7
+          # 8 = 4 CTX001 (bodies at 383/383/383/388 against a 380 threshold) + 4 REF002
+          # (mir-cloud -> -gcp/-azure/-cloudflare, mir-frontend -> -react-remix).
+          #
+          # Raised from 7 in the commit that fixed D1. The count went UP because a defect
+          # was FIXED: validate.py's SKILL_REF could not see the bare suffixes in
+          # `mir-cloud-aws` / `-gcp` / `-azure` / `-cloudflare`, so mir-cloud reported one
+          # unwritten module when three more were equally unwritten. Spelling them in full
+          # made the other three visible. The pressure at that moment is to revert the fix
+          # or delete the .mir-planned lines -- and deleting them promotes REF002 to
+          # REF001, an ERROR, after which install.sh refuses to install for everyone. The
+          # number moving is the correct outcome; write down why, and move it.
+          BUDGET = 8
           if warnings > BUDGET:
               print(f"::error::warning count {warnings} exceeds the ratchet of {BUDGET}. "
                     "If the new warning is deliberate (a new .mir-planned entry, a skill "

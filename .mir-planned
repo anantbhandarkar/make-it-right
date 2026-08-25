@@ -11,12 +11,10 @@
 mir-frontend-react-remix
 
 # Angular reactivity tier. mir-frontend Gate 0 lists it as a selectable tier.
-mir-frontend-angular
 
 # Cloud provider modules. mir-cloud is provider-neutral by design and hands off to
 # a provider module at Gate 5 for service mechanics. The pillar and its decision
 # tables ship first; the per-provider modules follow.
-mir-cloud-aws
 mir-cloud-gcp
 mir-cloud-azure
 mir-cloud-cloudflare

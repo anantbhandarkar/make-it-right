@@ -1,6 +1,6 @@
 ---
 name: mir-frontend
-description: "Make It Right (frontend pillar). Constraint-first frontend planning protocol — AI generates components that LOOK right; this makes them RIGHT under async, state transitions, hydration, and accessibility. Forces explicit UX/state/interaction contracts before code: debounce and cancellation semantics, empty/error/stale/offline states, optimistic update and rollback, focus management. Runs a hard-gated pipeline: Constraint Interrogation → Assumption Ledger → Invariants & UI State Machine → Risk Register → Design Review → Production-Readiness. Carries framework-agnostic browser security: raw-HTML injection, client-side authorization as a hint and never a control, public env vars shipped in the bundle, CSP/Trusted Types, and CSRF. Chains: this → reactivity tier (mir-frontend-react, mir-frontend-vue, or mir-frontend-vanilla for plain-DOM work) → framework module (mir-frontend-react-next, mir-frontend-vue-nuxt). TRIGGER for browser UI work in any reactive library or none — components, hooks, composables, forms, data-fetching UI, routing, styling, accessibility, and PWAs. SKIP for backend logic (mir-backend), native iOS/Android apps (mir-mobile), standalone database or data-pipeline work (mir-database), CI/CD and dependency-pipeline controls (mir-devsecops), and pure data/CLI scripts."
+description: "Make It Right (frontend pillar). Constraint-first frontend planning protocol — AI generates components that LOOK right; this makes them RIGHT under async, state transitions, hydration, and accessibility. Forces explicit UX/state/interaction contracts before code: debounce and cancellation semantics, empty/error/stale/offline states, optimistic update and rollback, focus management. Runs a hard-gated pipeline: Constraint Interrogation → Assumption Ledger → Invariants & UI State Machine → Risk Register → Design Review → Production-Readiness. Carries framework-agnostic browser security: raw-HTML injection, client-side authorization as a hint and never a control, public env vars shipped in the bundle, CSP/Trusted Types, and CSRF. Chains: this → reactivity tier (mir-frontend-react, mir-frontend-vue, mir-frontend-angular, or mir-frontend-vanilla for plain-DOM work) → framework module (mir-frontend-react-next, mir-frontend-vue-nuxt). TRIGGER for browser UI work in any reactive library or none — components, hooks, composables, forms, data-fetching UI, routing, styling, accessibility, and PWAs. SKIP for backend logic (mir-backend), native iOS/Android apps (mir-mobile), standalone database or data-pipeline work (mir-database), CI/CD and dependency-pipeline controls (mir-devsecops), and pure data/CLI scripts."
 trigger: /mir-frontend
 argument-hint: "<task description> [--advisory] [--skip-interrogation]"
 allowed-tools:
@@ -88,8 +88,9 @@ Before anything, do three things in your own words (no tools yet):
    |---|---|---|
    | React, any meta-framework | `mir-frontend-react` | `mir-frontend-react-next` (Next.js). None yet for React Router or TanStack Start |
    | Vue 3 | `mir-frontend-vue` | `mir-frontend-vue-nuxt` (Nuxt). None yet for a Vite SPA or Quasar |
+   | Angular (v20–v22) | `mir-frontend-angular` | none — Angular ships DI, Router, Forms, SSR and the CLI in one box, so that tier carries the framework layer too |
    | No framework — plain DOM, Web Components, a widget inside someone else's page | `mir-frontend-vanilla` | none |
-   | Angular, Svelte, Solid | none written yet | run this pillar alone and say so in the design |
+   | Svelte, Solid | none written yet | run this pillar alone and say so in the design |
 
    Going framework-free is a real choice with a real cost. Read the "Do NOT use when…" row for it in `references/rendering-model-map.md` before taking it.
 
@@ -228,9 +229,10 @@ End with: **"Approve this design or tell me what to change. I won't write code u
 |---|---|---|
 | `mir-frontend-react` | hook rules, derived state, stale closures, Suspense + Error Boundary placement, Actions, Compiler interop | `mir-frontend-react-next` — RSC boundary, Server Actions, `use cache`, revalidation |
 | `mir-frontend-vue` | `ref` vs `reactive`, computed purity, watch flush timing, `v-for` keys, SSR cross-request state | `mir-frontend-vue-nuxt` — universal rendering, `useAsyncData`/`useFetch`, `runtimeConfig`, Nitro routes |
+| `mir-frontend-angular` | signal graph and `computed` purity, zoned vs zoneless change detection, injection contexts, `DestroyRef` teardown, guards, forms, SSR/hydration, the CLI | none — that tier carries the framework layer itself |
 | `mir-frontend-vanilla` | listener/observer/timer teardown, markup setters, custom-element lifecycle, manual focus | none |
 
-**Planned, not written — do not try to load these:** `mir-frontend-react-remix` (React Router / Remix) and `mir-frontend-angular`. Both sit on the repo's planned-not-written list, the one `validate.py` reads. If the stack is one of them, run this pillar plus the nearest tier, and record in the design that module-level rules were unavailable.
+**Planned, not written — do not try to load it:** `mir-frontend-react-remix` (React Router / Remix). It sits on the repo's planned-not-written list, the one `validate.py` reads. If the stack is that one, run this pillar plus `mir-frontend-react`, and record in the design that module-level rules were unavailable.
 
 </gate5>
 
@@ -329,7 +331,7 @@ If the task spans **multiple independent UI flows** (e.g. a search results list 
 ## Composing with your other skills
 
 - **anant-plan / GSD**: this is the frontend-specific planning layer. When a GSD/anant-plan phase is a frontend feature, run this skill *inside* that phase's planning before writing the phase's code. It produces the Assumption Ledger + UI State Machine that the phase plan should cite.
-- **Reactivity tier + framework module** (3-tier chain): this skill decides *what's correct* for any browser UI; the **reactivity tier** carries what is true for every framework built on one reactivity model — `mir-frontend-react`, `mir-frontend-vue`, or `mir-frontend-vanilla` for plain-DOM code; the **framework module** knows one meta-framework's mechanics — `mir-frontend-react-next`, `mir-frontend-vue-nuxt`. Consult `references/rendering-model-map.md` at Gate 0 to pick and validate the render model and tier; load tier + module at Gate 5/6.
+- **Reactivity tier + framework module** (3-tier chain): this skill decides *what's correct* for any browser UI; the **reactivity tier** carries what is true for every framework built on one reactivity model — `mir-frontend-react`, `mir-frontend-vue`, `mir-frontend-angular`, or `mir-frontend-vanilla` for plain-DOM code; the **framework module** knows one meta-framework's mechanics — `mir-frontend-react-next`, `mir-frontend-vue-nuxt`. Angular has no module below its tier: the framework layer lives in `mir-frontend-angular` itself. Consult `references/rendering-model-map.md` at Gate 0 to pick and validate the render model and tier; load tier + module at Gate 5/6.
 - **Sibling pillars** — each owns a different question. None of them is a frontend framework:
 
   | Pillar | Owns | Load it when |
@@ -346,18 +348,18 @@ When you want to change or extend this kit, edit the **right layer**. Use the pl
 
 Four nested questions pick the layer:
 > **"Is this true for React, Vue, and plain DOM alike (any browser UI)?"** → **generic** (edit `mir-frontend`).
-> **"Is it true for every framework built on one reactivity model?"** → **reactivity tier** (edit `mir-frontend-react`, `mir-frontend-vue`, or `mir-frontend-vanilla`) — hook rules and stale closures for React; `ref` vs `reactive` and watch flush timing for Vue; listener teardown and markup setters for plain DOM.
-> **"Does it only apply to one meta-framework?"** → **framework module** (edit `mir-frontend-react-next` or `mir-frontend-vue-nuxt`).
-> **New reactivity library** (Angular/Svelte/Solid)? → new `mir-frontend-<lib>` tier. **New meta-framework?** → new `mir-frontend-<lib>-<framework>` module under its tier. Copy the nearest sibling's shape; never widen a higher tier.
+> **"Is it true for every framework built on one reactivity model?"** → **reactivity tier** (edit `mir-frontend-react`, `mir-frontend-vue`, `mir-frontend-angular`, or `mir-frontend-vanilla`) — hook rules and stale closures for React; `ref` vs `reactive` and watch flush timing for Vue; the signal graph, injection contexts and zoned-vs-zoneless change detection for Angular; listener teardown and markup setters for plain DOM.
+> **"Does it only apply to one meta-framework?"** → **framework module** (edit `mir-frontend-react-next` or `mir-frontend-vue-nuxt`). Angular is the exception — it has no module, so its framework mechanics (DI, Router, Forms, `@angular/ssr`, the CLI) live in `mir-frontend-angular` and its `references/`.
+> **New reactivity library** (Svelte/Solid)? → new `mir-frontend-<lib>` tier. **New meta-framework?** → new `mir-frontend-<lib>-<framework>` module under its tier — including an Angular meta-framework such as AnalogJS, which gets its own module under `mir-frontend-angular` rather than widening that tier. Copy the nearest sibling's shape; never widen a higher tier.
 
 | Layer | Scope | Files to edit | Edit it when… |
 |---|---|---|---|
 | **Generic core** ← *this skill* | framework-agnostic browser UI, with or without a library | `skills/mir-frontend/SKILL.md` (the gates + Security) · its four `references/` files | a reliability principle, gate, question, invariant, security rule, or checklist item applies **regardless of library** |
-| **Reactivity tier** | everything shared by the frameworks on one reactivity model | `skills/mir-frontend-react/SKILL.md` · `skills/mir-frontend-vue/SKILL.md` · `skills/mir-frontend-vanilla/SKILL.md` | the rule is true for **every meta-framework on that model** but not for the other tiers |
+| **Reactivity tier** | everything shared by the frameworks on one reactivity model | `skills/mir-frontend-react/SKILL.md` · `skills/mir-frontend-vue/SKILL.md` · `skills/mir-frontend-angular/` (SKILL.md + three `references/` files) · `skills/mir-frontend-vanilla/SKILL.md` | the rule is true for **every meta-framework on that model** but not for the other tiers. For Angular, also when the rule is a framework mechanic — that tier has no module under it |
 | **Framework module** | one meta-framework's mechanics | `skills/mir-frontend-react-next/` · `skills/mir-frontend-vue-nuxt/` (SKILL.md + `references/`) | the rule is a **mechanical footgun of one framework** — RSC boundary, Server Action authorization, `use cache`, `useAsyncData` keys, file-routing waterfall |
 | **Reviewers** (shared by all tiers) | the Gate 7 review passes | `agents/reliability-reviewer.md` · `agents/security-reviewer.md` · `agents/a11y-reviewer.md` · `agents/frontend-perf-reviewer.md` · `agents/constraint-interrogator.md` | a review focus area or the question-interrogation method changes |
 
-Planned but **not written**, so nothing can load them: `mir-frontend-react-remix` and `mir-frontend-angular`. Both are on the repo's planned-not-written list. Writing either one is a new directory, not an edit here.
+Planned but **not written**, so nothing can load it: `mir-frontend-react-remix`. It is on the repo's planned-not-written list. Writing it is a new directory, not an edit here.
 
 ## References
 
@@ -372,4 +374,4 @@ Planned but **not written**, so nothing can load them: `mir-frontend-react-remix
 
 Seeded from a ChatGPT "AI Frontend Reliability Skill (May 2026)" draft (16 weakness areas + 2026-realities + phase workflow), reconciled with a verified currency/gap analysis (16 gaps, 9 staleness corrections, tiering options), and mapped onto the Make It Right 3-tier contract. Middle-tier decision (reactivity library, not rendering model or meta-framework) made 2026-05-26.
 
-**Currency baseline — checked against the npm registry on 13 Aug 2026:** react/react-dom 19.2.8 · next 16.3.0 · react-router 8.3.0 · @tanstack/react-start 1.168.44 · @tanstack/react-query 5.101.4 · @tanstack/react-virtual 3.14.9 · vue 3.5.41 · nuxt 4.5.2 · @angular/core 22.1.1 · svelte 5.56.9 · vite 8.2.1 · astro 7.2.1 · tailwindcss 4.3.3 · dompurify 3.4.13 · axe-core 4.13.0 · web-vitals 6.1.0 · eslint-plugin-react-hooks 7.1.1 · babel-plugin-react-compiler 1.0.0. Standards: WCAG 2.2 is a W3C Recommendation (updated 12 Dec 2024); Core Web Vitals are LCP ≤ 2.5 s, INP ≤ 200 ms, CLS ≤ 0.1, with FID retired in favour of INP. **Anything not on that list is unverified here — check it before you quote it.** Per-package security floors live in the tier and module skills, which own them.
+**Currency baseline — checked against the npm registry on 13 Aug 2026:** react/react-dom 19.2.8 · next 16.3.0 · react-router 8.3.0 · @tanstack/react-start 1.168.44 · @tanstack/react-query 5.101.4 · @tanstack/react-virtual 3.14.9 · vue 3.5.41 · nuxt 4.5.2 · @angular/core 22.1.3 and @angular/cli 22.1.5 (both re-checked 25 Aug 2026; `mir-frontend-angular` owns the Angular floor and its LTS dates) · svelte 5.56.9 · vite 8.2.1 · astro 7.2.1 · tailwindcss 4.3.3 · dompurify 3.4.13 · axe-core 4.13.0 · web-vitals 6.1.0 · eslint-plugin-react-hooks 7.1.1 · babel-plugin-react-compiler 1.0.0. Standards: WCAG 2.2 is a W3C Recommendation (updated 12 Dec 2024); Core Web Vitals are LCP ≤ 2.5 s, INP ≤ 200 ms, CLS ≤ 0.1, with FID retired in favour of INP. **Anything not on that list is unverified here — check it before you quote it.** Per-package security floors live in the tier and module skills, which own them.

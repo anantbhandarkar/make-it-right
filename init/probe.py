@@ -46,6 +46,20 @@ Each BLOCK row carries what it PROVES, because "blocked" is not one claim:
   pattern-literal  the entry could not be instantiated, so its own spelling was fired. No
                    agent writes a path containing `*`; the row is a placeholder, not a test.
 
+Each attack is judged on the CHANNEL ITS HOST ACTUALLY READS, not on the exit code alone.
+Claude Code and Codex block on exit 2. Antigravity ignores the exit code entirely and reads
+a deny decision off stdout as JSON, so an adapter there BLOCKS with exit 0 plus stdout. A
+probe that only understood exit codes would read every Antigravity BLOCK as an ALLOW, turn
+every denied row into a LEAK, and make "just exit 2 as well" look like the fix -- which would
+turn this report green while the real host allowed every write. So the verdict reader is
+per-protocol and, on the stdout channel, the exit code is not consulted at all:
+
+  exit 0 with empty or unparseable stdout is GUARD-ERROR, never ALLOW.
+
+A crashed adapter must not read as a clean allow-path run. The same rule points the other
+way for the exit-code hosts: `ask` is not a block, because Codex treats an unsupported
+decision as "continue past", so an adapter that answers `ask` has enforced nothing.
+
 A WIRING phase runs alongside the attacks. Every attack above invokes guard.py DIRECTLY, so
 none of them reads .claude/settings.json -- a stale matcher would leave structured writes
 completely unguarded while every attack row still said BLOCK. The wiring phase reads the
@@ -89,21 +103,164 @@ ALLOW, BLOCK = 0, 2
 # once looked like "everything blocked".
 EXIT_CLEAN, EXIT_LEAK, EXIT_NO_TARGET, EXIT_INCONCLUSIVE = 0, 1, 2, 3
 
+# The three things a row can report. GUARD_ERROR is not a third verdict the host understands
+# -- it is the probe saying the adapter answered on no channel at all, which is why it can
+# never be collapsed into ALLOW.
+V_ALLOW, V_BLOCK, V_ERROR = "ALLOW", "BLOCK", "GUARD-ERROR"
 
-def run_guard(guard: str, event: dict, cwd: str) -> int:
+# Which channel each host reads a verdict off. This is a fact about the HOST, not about the
+# guard: it decides how the probe interprets an answer, so an adapter cannot make a row green
+# by answering on a channel its host ignores.
+CHANNEL_EXIT, CHANNEL_STDOUT = "exit-code", "stdout-json"
+PROTOCOL_CHANNEL = {
+    "claude": CHANNEL_EXIT,        # PreToolUse hook: exit 2 blocks
+    "codex": CHANNEL_EXIT,         # hooks block on exit 2
+    "antigravity": CHANNEL_STDOUT, # exit code IGNORED by the host; deny-JSON on stdout blocks
+    "cursor": CHANNEL_EXIT,        # reads Claude Code's config, so it reads Claude's channel
+}
+
+# The target every manifest written before cross-agent init declared implicitly. A manifest
+# with no `targets` block is not a manifest with no targets -- reading it that way would make
+# an older harness verify nothing at all while reporting a clean run.
+DEFAULT_TARGET = "claude"
+
+# Decisions read off the stdout channel. Deliberately a small closed set: an unrecognised
+# decision string is GUARD-ERROR, never ALLOW, so a typo'd or invented verdict fails closed.
+# `ask` is in NEITHER set on purpose -- Codex treats it as unsupported and continues past, so
+# an adapter that answers `ask` has allowed the write while looking like it deferred.
+_DENY_DECISIONS = {"deny", "denied", "block", "blocked"}
+_ALLOW_DECISIONS = {"allow", "allowed", "approve", "approved", "permit"}
+_UNSUPPORTED_DECISIONS = {"ask", "confirm", "prompt"}
+
+
+def run_guard(guard: str, event: dict, cwd: str, protocol: str = None):
+    """Fire one event at the guard. Returns (exit code, stdout).
+
+    stdout is returned rather than discarded because on the Antigravity channel it is the
+    ONLY place a verdict appears; a runner that returned the exit code alone could not tell
+    a deny from a crash there. See read_verdict for who decides which one matters.
+
+    `--protocol` is passed only when the guard's own source declares the flag. Before that
+    flag exists, passing it would hand an argument to a guard that would reject it, and the
+    probe would be testing its own invocation rather than the policy.
+    """
+    cmd = [sys.executable, guard]
+    if protocol is not None:
+        cmd += ["--protocol", protocol]
     p = subprocess.run(
-        [sys.executable, guard],
+        cmd,
         input=json.dumps(event),
         text=True,
         capture_output=True,
         cwd=cwd,
     )
-    # The guard returns 0 (allow) or 2 (block). Anything else is a guard crash: treat as
-    # inconclusive, not as allow, so a broken guard never reads as a pass.
     # NOTE: a MISSING guard file makes Python itself exit 2, which collides with BLOCK. The
     # caller must verify the guard path exists BEFORE calling this, or a probe with no guard
     # would read every attack as "blocked" and pass for the wrong reason.
-    return p.returncode
+    return p.returncode, p.stdout
+
+
+def channel_for(protocol: str) -> str:
+    """The channel a protocol answers on. An UNKNOWN protocol gets the stdout channel, which
+    is the stricter reader: it refuses to call anything a BLOCK unless a decision was actually
+    printed. Defaulting an unknown host to the exit-code reader would let a fifth target
+    inherit Claude's semantics silently, which is the shape B1.1 exists to forbid."""
+    return PROTOCOL_CHANNEL.get(protocol, CHANNEL_STDOUT)
+
+
+def read_verdict(protocol: str, rc: int, stdout: str):
+    """(verdict, why) for one guard invocation under one host's rules.
+
+    On the stdout channel the exit code is not consulted AT ALL. That is deliberate and it is
+    the whole point of this function: Antigravity's host ignores it, so honouring an exit 2
+    here would let an adapter that exits 2 and prints nothing read as a BLOCK while the real
+    host allowed the write. The probe must fail exactly where the host would.
+    """
+    if channel_for(protocol) == CHANNEL_STDOUT:
+        text = (stdout or "").strip()
+        if not text:
+            return V_ERROR, (f"exit {rc} with EMPTY stdout: on {protocol} the host reads the "
+                             "decision off stdout, so this answered on no channel at all")
+        try:
+            obj = json.loads(text)
+        except ValueError:
+            return V_ERROR, f"stdout is not JSON, so {protocol} would read no decision from it"
+        if not isinstance(obj, dict):
+            return V_ERROR, "stdout JSON is not an object, so it carries no `decision`"
+        # `permissionDecision` is read as a fallback because that is the key Claude Code's own
+        # deny-JSON uses, and an adapter that emits it has clearly decided; refusing to read it
+        # would report GUARD-ERROR on a guard that blocked.
+        decision = obj.get("decision", obj.get("permissionDecision"))
+        if not isinstance(decision, str):
+            return V_ERROR, "stdout JSON carries no string `decision`"
+        d = decision.strip().lower()
+        if d in _DENY_DECISIONS:
+            return V_BLOCK, ""
+        if d in _ALLOW_DECISIONS:
+            return V_ALLOW, ""
+        if d in _UNSUPPORTED_DECISIONS:
+            return V_ERROR, (f"decision {decision!r} is not a block: the host continues past an "
+                             "unsupported decision, so nothing was enforced")
+        return V_ERROR, f"decision {decision!r} is neither an allow nor a deny"
+
+    if rc == BLOCK:
+        return V_BLOCK, ""
+    if rc == ALLOW:
+        # An exit-code host still reads a JSON decision where it offers one (Codex's
+        # apply_patch), and `ask` there is not a block -- Codex treats it as unsupported and
+        # continues past. Exit 0 plus `ask` is therefore an unenforced write, not an allow the
+        # policy chose.
+        try:
+            obj = json.loads((stdout or "").strip() or "null")
+        except ValueError:
+            obj = None
+        if isinstance(obj, dict):
+            d = obj.get("decision", obj.get("permissionDecision"))
+            if isinstance(d, str) and d.strip().lower() in _UNSUPPORTED_DECISIONS:
+                return V_ERROR, (f"exit 0 with decision {d!r}: {protocol} continues past an "
+                                 "unsupported decision, so this enforced nothing")
+        return V_ALLOW, ""
+    return V_ERROR, f"exit {rc} is outside {{{ALLOW}, {BLOCK}}}: neither allowed nor blocked"
+
+
+def declared_targets(manifest: dict) -> list:
+    """[{name, protocol}] the manifest declares, read from the manifest and never from flags.
+
+    Shape-tolerant on purpose -- a dict of name -> spec and a list of names both parse --
+    because this file is COPIED into a project and has to keep reading manifests written by
+    older and newer generators alike. A manifest with no `targets` block declares
+    DEFAULT_TARGET: those manifests predate cross-agent init and named Claude Code implicitly,
+    and reading "no block" as "no targets" would silently skip the whole attack phase.
+    """
+    raw = manifest.get("targets")
+    out: list = []
+    if isinstance(raw, dict):
+        items = list(raw.items())
+    elif isinstance(raw, list):
+        items = [(t, {}) if isinstance(t, str)
+                 else (t.get("name"), t) for t in raw if isinstance(t, (str, dict))]
+    else:
+        items = []
+    for name, spec in items:
+        if not isinstance(name, str) or not name:
+            continue
+        proto = spec.get("protocol") if isinstance(spec, dict) else None
+        out.append({"name": name, "protocol": proto if isinstance(proto, str) and proto else name})
+    return out or [{"name": DEFAULT_TARGET, "protocol": DEFAULT_TARGET}]
+
+
+def attack_protocols(targets: list) -> list:
+    """The distinct protocols to fire the attack suite under, in declaration order.
+
+    Distinct PROTOCOLS, not targets: two targets that read the same channel would produce two
+    identical tables, and a row printed twice is one question counted twice.
+    """
+    seen, out = set(), []
+    for t in targets:
+        if t["protocol"] not in seen:
+            seen.add(t["protocol"])
+            out.append(t["protocol"])
+    return out
 
 
 def resolve_guard(explicit: str | None, repo_root: str) -> str | None:

@@ -90,7 +90,7 @@ The questions AI skips because the answers live in a designer's head or a PRD no
 ## Dimension 3 — Rendering
 
 - **Rendering model**: CSR, SSR, RSC+streaming, SSG/ISR, or Edge? (consult `rendering-model-map.md` at Gate 0)
-- **Reactivity tier**: React, Vue, or no framework at all? A written tier exists for each of those three; Angular, Svelte, and Solid have none yet. Going framework-free means no render loop and no automatic teardown — a deliberate choice for a widget, a design-system primitive, or an embedded script, and a bad one for an app with interdependent state. Table 2 in `rendering-model-map.md` has the "Do NOT use when…" list
+- **Reactivity tier**: React, Vue, Angular, or no framework at all? A written tier exists for each of those four; Svelte and Solid have none yet. Going framework-free means no render loop and no automatic teardown — a deliberate choice for a widget, a design-system primitive, or an embedded script, and a bad one for an app with interdependent state. Table 2 in `rendering-model-map.md` has the "Do NOT use when…" list
 - **Streaming / Suspense boundaries**: which parts of the page stream progressively vs. block render?
   - Stream non-critical panels behind Suspense; block only above-the-fold critical content `[DEFAULT — Recommended]`
   - Block entire page until all data is ready — simpler; avoid for pages with slow-loading sub-sections
