@@ -533,11 +533,11 @@ def _init_flow() -> Diagram:
         Node("repo", "your repo", text="your repository"),
     ]
     steps = [
-        Step("u", "cli", "mir init --repo ."),
+        Step("u", "cli", "mir init ."),
         Step("cli", "det", "detect(repo)"),
         Step("det", "cli", "proposals and conflicts, never a decision", reply=True),
         Step("cli", "u", "if a pillar is undecided, refuse and list the options", reply=True),
-        Step("u", "cli", "--answers frontend=mir-frontend-react"),
+        Step("u", "cli", "--answers answers.json"),
         Step("cli", "cat", "resolve(answers)"),
         Step("cat", "cli", "chain-ordered skills plus recorded gaps", reply=True),
         Step("cli", "gen", "plan(repo, skills, answers)"),
