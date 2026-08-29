@@ -103,12 +103,12 @@ jobs:
             python-version: "3.9"
           - os: ubuntu-latest
             python-version: "3.13"
-          # macos-13 is the last Intel (x86_64) GitHub-hosted macOS image. CPython 3.9's
+          # macos-15-intel is the supported Intel (x86_64) GitHub-hosted macOS image. CPython 3.9's
           # earliest macOS builds predate Apple Silicon's universal2 installers, so pinning
           # the 3.9 leg to an Intel runner is the safer match for "the floor" rather than
           # trusting every 3.9.x patch release to have a well-tested arm64 build in the
           # actions/python-versions manifest that setup-python reads from.
-          - os: macos-13
+          - os: macos-15-intel
             python-version: "3.9"
           - os: macos-latest
             python-version: "3.13"

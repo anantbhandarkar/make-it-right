@@ -28,8 +28,8 @@ holds the current version as one line with no `v` prefix; the `v` belongs to the
 
 ### Fixed
 
-- Updated the end-to-end CI check to expect the current manifest version, so the latest
-  branch can pass its own release checks.
+- Updated the end-to-end CI check to expect the current manifest version and moved the
+  Python 3.9 macOS leg to GitHub's supported Intel runner.
 
 ### Upgrading
 
