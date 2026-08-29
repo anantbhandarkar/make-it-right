@@ -228,7 +228,7 @@ jobs:
           test -f "$proj/.mir/probe.py"
           test -f "$proj/.claude/settings.json"
           test -f "$proj/AGENTS.md"
-          grep -q '"mir_manifest_version": 1' "$proj/.mir/manifest.json"
+          grep -q '"mir_manifest_version": 2' "$proj/.mir/manifest.json"
       - name: mir init --install links this repo's resolved tiers/modules locally
         run: |
           set -euo pipefail

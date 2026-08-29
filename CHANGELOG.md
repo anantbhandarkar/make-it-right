@@ -20,6 +20,22 @@ holds the current version as one line with no `v` prefix; the `v` belongs to the
 
 ## [Unreleased]
 
+## [2.0.3] - 2026-08-29
+
+### Changed
+
+- Added the Make It Right logo to the README.
+
+### Fixed
+
+- Updated the end-to-end CI check to expect the current manifest version, so the latest
+  branch can pass its own release checks.
+
+### Upgrading
+
+- No migration is required. Pull the new tag or use a fresh checkout; harness behavior is
+  unchanged.
+
 ## [2.0.2] - 2026-08-26
 
 ### Changed
